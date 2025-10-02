@@ -1,6 +1,3 @@
-Of course. Here is a `readme.txt` file that explains all the experiments performed by your ablation script.
-
-```
 =====================================================
 F5-TTS DiT Ablation Study - Experiment Descriptions
 =====================================================
@@ -64,7 +61,7 @@ This document describes the purpose and expected outcome of each experiment gene
 - **Expected Outcome:** Severely degraded audio.
 
 
-## Causal Interventions (Store and Re-insert) 🔬
+## Causal Interventions (Store and Re-insert) 
 ------------------------------------
 
 ### 13_reinsert_block0_to_block4.wav
@@ -82,4 +79,4 @@ This document describes the purpose and expected outcome of each experiment gene
 ### 11_extract_activations.wav
 - **Purpose:** A non-invasive diagnostic run. It does not modify the model's behavior at all. Instead, it uses extraction hooks to save the internal states (activations) of several key layers to a file for later offline analysis (e.g., plotting statistics).
 - **Expected Outcome:** Audio should be identical to `01_baseline.wav`.
-```
+

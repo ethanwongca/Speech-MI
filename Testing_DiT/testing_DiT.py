@@ -119,9 +119,9 @@ if __name__ == "__main__":
     print(f"\nOutput difference from original: {(output_before_feat - output_patched2).abs().mean():.6f}")
     
     if after_feat_data[:, :, 10].abs().max() < 1e-6:
-        print("✓ PATCH WORKING: Feature 10 successfully zeroed!")
+        print("PATCH WORKING: Feature 10 successfully zeroed!")
     else:
-        print("✗ PATCH FAILED: Feature 10 was not zeroed!")
+        print("PATCH FAILED: Feature 10 was not zeroed!")
     
     # Test 6: Test patch on input_embed (simpler layer)
     print("\n" + "─"*80)
@@ -152,9 +152,9 @@ if __name__ == "__main__":
     print(f"\nOutput difference: {(output_clean - output_patched_input).abs().mean():.6f}")
     
     if input_after[0].abs().max() < 1e-6:
-        print("✓ PATCH WORKING: Input batch 0 successfully zeroed!")
+        print("PATCH WORKING: Input batch 0 successfully zeroed!")
     else:
-        print("✗ PATCH FAILED: Input batch 0 was not zeroed!")
+        print("PATCH FAILED: Input batch 0 was not zeroed!")
     
     # Test 7: Multiple hooks
     print("\n" + "─"*80)

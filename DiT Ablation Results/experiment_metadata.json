@@ -1,0 +1,314 @@
+{
+  "timestamp": "20251001_005853",
+  "gen_text": "This is a test of the ablation system.",
+  "experiments": {
+    "00_capture_run": {
+      "success": true,
+      "error": null,
+      "activation_stats": {
+        "capture_b0": {
+          "shape": [
+            2,
+            568,
+            1024
+          ],
+          "mean": 0.08465576171875,
+          "std": 6.921875,
+          "min": -130.25,
+          "max": 314.5,
+          "call_count": 32
+        }
+      },
+      "hook_stats": {
+        "active_hooks": 1,
+        "captured_activations": 1,
+        "hook_details": {
+          "capture_b0": {
+            "type": "extraction",
+            "call_count": 32,
+            "captured": true
+          }
+        }
+      },
+      "audio_file": "00_capture_run.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 1.9733333333333334
+    },
+    "01_baseline": {
+      "success": true,
+      "error": null,
+      "activation_stats": {},
+      "hook_stats": {
+        "active_hooks": 0,
+        "captured_activations": 0,
+        "hook_details": {}
+      },
+      "audio_file": "01_baseline.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 1.9733333333333334
+    },
+    "02_zero_block0": {
+      "success": true,
+      "error": null,
+      "activation_stats": {},
+      "hook_stats": {
+        "active_hooks": 1,
+        "captured_activations": 0,
+        "hook_details": {
+          "zero_b0": {
+            "type": "patch",
+            "call_count": 32
+          }
+        }
+      },
+      "audio_file": "02_zero_block0.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 1.9733333333333334
+    },
+    "03_zero_block_last": {
+      "success": true,
+      "error": null,
+      "activation_stats": {},
+      "hook_stats": {
+        "active_hooks": 0,
+        "captured_activations": 0,
+        "hook_details": {}
+      },
+      "audio_file": "03_zero_block_last.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 1.9733333333333334
+    },
+    "04_zero_input_embed": {
+      "success": true,
+      "error": null,
+      "activation_stats": {},
+      "hook_stats": {
+        "active_hooks": 1,
+        "captured_activations": 0,
+        "hook_details": {
+          "zero_input": {
+            "type": "patch",
+            "call_count": 64
+          }
+        }
+      },
+      "audio_file": "04_zero_input_embed.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 1.9733333333333334
+    },
+    "05_zero_text_embed": {
+      "success": true,
+      "error": null,
+      "activation_stats": {},
+      "hook_stats": {
+        "active_hooks": 1,
+        "captured_activations": 0,
+        "hook_details": {
+          "zero_text": {
+            "type": "patch",
+            "call_count": 2
+          }
+        }
+      },
+      "audio_file": "05_zero_text_embed.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 1.9733333333333334
+    },
+    "06_zero_feature_dim10": {
+      "success": true,
+      "error": null,
+      "activation_stats": {},
+      "hook_stats": {
+        "active_hooks": 1,
+        "captured_activations": 0,
+        "hook_details": {
+          "zero_feat10": {
+            "type": "patch",
+            "call_count": 32
+          }
+        }
+      },
+      "audio_file": "06_zero_feature_dim10.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 1.9733333333333334
+    },
+    "07_constant_block0": {
+      "success": true,
+      "error": null,
+      "activation_stats": {},
+      "hook_stats": {
+        "active_hooks": 1,
+        "captured_activations": 0,
+        "hook_details": {
+          "const_b0": {
+            "type": "patch",
+            "call_count": 32
+          }
+        }
+      },
+      "audio_file": "07_constant_block0.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 1.9733333333333334
+    },
+    "08_constant_input_proj": {
+      "success": true,
+      "error": null,
+      "activation_stats": {},
+      "hook_stats": {
+        "active_hooks": 1,
+        "captured_activations": 0,
+        "hook_details": {
+          "const_proj": {
+            "type": "patch",
+            "call_count": 64
+          }
+        }
+      },
+      "audio_file": "08_constant_input_proj.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 1.9733333333333334
+    },
+    "09_zero_time_embed": {
+      "success": true,
+      "error": null,
+      "activation_stats": {},
+      "hook_stats": {
+        "active_hooks": 1,
+        "captured_activations": 0,
+        "hook_details": {
+          "zero_time": {
+            "type": "patch",
+            "call_count": 32
+          }
+        }
+      },
+      "audio_file": "09_zero_time_embed.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 1.9733333333333334
+    },
+    "10_multi_zero_blocks": {
+      "success": true,
+      "error": null,
+      "activation_stats": {},
+      "hook_stats": {
+        "active_hooks": 2,
+        "captured_activations": 0,
+        "hook_details": {
+          "zero_b0": {
+            "type": "patch",
+            "call_count": 32
+          },
+          "zero_b1": {
+            "type": "patch",
+            "call_count": 32
+          }
+        }
+      },
+      "audio_file": "10_multi_zero_blocks.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 1.9733333333333334
+    },
+    "11_extract_activations": {
+      "success": true,
+      "error": null,
+      "activation_stats": {
+        "ext_input": {
+          "shape": [
+            1,
+            568,
+            1024
+          ],
+          "mean": 0.384033203125,
+          "std": 6.68359375,
+          "min": -127.375,
+          "max": 697.5,
+          "call_count": 64
+        },
+        "ext_b0": {
+          "shape": [
+            2,
+            568,
+            1024
+          ],
+          "mean": 0.0914306640625,
+          "std": 7.01171875,
+          "min": -128.625,
+          "max": 315.75,
+          "call_count": 32
+        },
+        "ext_b_mid": {
+          "shape": [
+            2,
+            568,
+            1024
+          ],
+          "mean": -0.33984375,
+          "std": 25.28125,
+          "min": -11248.0,
+          "max": 1901.0,
+          "call_count": 32
+        }
+      },
+      "hook_stats": {
+        "active_hooks": 3,
+        "captured_activations": 3,
+        "hook_details": {
+          "ext_input": {
+            "type": "extraction",
+            "call_count": 64,
+            "captured": true
+          },
+          "ext_b0": {
+            "type": "extraction",
+            "call_count": 32,
+            "captured": true
+          },
+          "ext_b_mid": {
+            "type": "extraction",
+            "call_count": 32,
+            "captured": true
+          }
+        }
+      },
+      "audio_file": "11_extract_activations.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 1.9733333333333334
+    },
+    "12_reinsert_block0_identity": {
+      "success": true,
+      "error": null,
+      "activation_stats": {},
+      "hook_stats": {
+        "active_hooks": 1,
+        "captured_activations": 0,
+        "hook_details": {
+          "reinsert_b0": {
+            "type": "patch",
+            "call_count": 32
+          }
+        }
+      },
+      "audio_file": "12_reinsert_block0_identity.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 1.9733333333333334
+    },
+    "13_reinsert_block0_to_block4": {
+      "success": true,
+      "error": null,
+      "activation_stats": {},
+      "hook_stats": {
+        "active_hooks": 1,
+        "captured_activations": 0,
+        "hook_details": {
+          "reinsert_b0_to_b4": {
+            "type": "patch",
+            "call_count": 32
+          }
+        }
+      },
+      "audio_file": "13_reinsert_block0_to_block4.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 1.9733333333333334
+    }
+  }
+}

@@ -1,0 +1,82 @@
+DiT Ablation Study Results
+Timestamp: 20251001_005853
+Generated Text: This is a test of the ablation system.
+
+Experiments: 14/14 successful
+
+
+============================================================
+Experiment: 00_capture_run
+Status: SUCCESS
+
+Activation Statistics:
+  capture_b0:
+    Shape: [2, 568, 1024]
+    Mean: 0.084656
+    Std: 6.921875
+
+============================================================
+Experiment: 01_baseline
+Status: SUCCESS
+
+============================================================
+Experiment: 02_zero_block0
+Status: SUCCESS
+
+============================================================
+Experiment: 03_zero_block_last
+Status: SUCCESS
+
+============================================================
+Experiment: 04_zero_input_embed
+Status: SUCCESS
+
+============================================================
+Experiment: 05_zero_text_embed
+Status: SUCCESS
+
+============================================================
+Experiment: 06_zero_feature_dim10
+Status: SUCCESS
+
+============================================================
+Experiment: 07_constant_block0
+Status: SUCCESS
+
+============================================================
+Experiment: 08_constant_input_proj
+Status: SUCCESS
+
+============================================================
+Experiment: 09_zero_time_embed
+Status: SUCCESS
+
+============================================================
+Experiment: 10_multi_zero_blocks
+Status: SUCCESS
+
+============================================================
+Experiment: 11_extract_activations
+Status: SUCCESS
+
+Activation Statistics:
+  ext_input:
+    Shape: [1, 568, 1024]
+    Mean: 0.384033
+    Std: 6.683594
+  ext_b0:
+    Shape: [2, 568, 1024]
+    Mean: 0.091431
+    Std: 7.011719
+  ext_b_mid:
+    Shape: [2, 568, 1024]
+    Mean: -0.339844
+    Std: 25.281250
+
+============================================================
+Experiment: 12_reinsert_block0_identity
+Status: SUCCESS
+
+============================================================
+Experiment: 13_reinsert_block0_to_block4
+Status: SUCCESS
