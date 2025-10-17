@@ -181,8 +181,6 @@ class CFM(nn.Module):
             if hooks_were_attached:
                 current_time_key = f"t_{t.item():.6f}"
                 all_timestep_activations[current_time_key] = {}
-                # Clear activations from previous step before capturing new ones
-                self.transformer.clear_activations()
                 for hook_name in capture_hooks_config.keys():
                     if hook_name in self.transformer.extracted_activations:
                         captured_data = self.transformer.extracted_activations[hook_name]
