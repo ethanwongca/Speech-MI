@@ -84,43 +84,39 @@ class CFM(nn.Module):
     @torch.no_grad()
     def sample(
         self,
-        cond: float["b n d"] | float["b nw"],  # noqa: F722
-        text: int["b nt"] | list[str],  # noqa: F722
-        duration: int | int["b"],  # noqa: F821
+        cond: float["b n d"] | float["b nw"],
+        text: int["b nt"] | list[str],
+        duration: int | int["b"],
         *,
-        lens: int["b"] | None = None,  # noqa: F821
+        lens: int["b"] | None = None,
         steps=32,
         cfg_strength=1.0,
         sway_sampling_coef=None,
         seed: int | None = None,
         max_duration=4096,
-        vocoder: Callable[[float["b d n"]], float["b nw"]] | None = None,  # noqa: F722
+        vocoder: Callable[[float["b d n"]], float["b nw"]] | None = None,
         use_epss=True,
         no_ref_audio=False,
         duplicate_test=False,
         t_inter=0.1,
         edit_mask=None,
+        # MODIFICATION: New argument to control hooking externally
+        capture_hooks_config: dict | None = None,
     ):
         self.eval()
-        # raw wave
-        """
-        Modifications to add hooks and storage 
-        """
-        # Dict storing all activations at all layers for the time step 
-        all_timestep_activations = {}
-    
-        # Store the paths and unique names for all hooks we create.
-        hook_info = []
 
-        # Getting all the modules within our model
-        print("Attaching all hooks to the modules in DiT")
-        for path, module in self.transformer.named_modules():
-            if path and not list(module.children()):
-                hook_name = path.replace('.', '_')
-                hook_info.append({'path': path, 'name': hook_name})
-                self.transformer.add_extraction_hook(submodule_path=path, hook_name=hook_name)
-        
-        print(f"Attached {len(hook_info)} hooks")
+        all_timestep_activations = {}
+        hooks_were_attached = False
+
+        # If a hook config is provided by the calling script, attach those specific hooks.
+        if capture_hooks_config:
+            hooks_were_attached = True
+            print(f"Attaching {len(capture_hooks_config)} specific hooks for this run:")
+            for hook_name, config in capture_hooks_config.items():
+                path = config.get('path')
+                if path:
+                    self.transformer.add_extraction_hook(submodule_path=path, hook_name=hook_name)
+                    print(f"  - Attached hook '{hook_name}' to layer '{path}'")
 
         if cond.ndim == 2:
             cond = self.mel_spec(cond)
@@ -133,16 +129,12 @@ class CFM(nn.Module):
         if not exists(lens):
             lens = torch.full((batch,), cond_seq_len, device=device, dtype=torch.long)
 
-        # text
-
         if isinstance(text, list):
             if exists(self.vocab_char_map):
                 text = list_str_to_idx(text, self.vocab_char_map).to(device)
             else:
                 text = list_str_to_tensor(text).to(device)
             assert text.shape[0] == batch
-
-        # duration
 
         cond_mask = lens_to_mask(lens)
         if edit_mask is not None:
@@ -153,11 +145,10 @@ class CFM(nn.Module):
 
         duration = torch.maximum(
             torch.maximum((text != -1).sum(dim=-1), lens) + 1, duration
-        )  # duration at least text/audio prompt length plus one token, so something is generated
+        )
         duration = duration.clamp(max=max_duration)
         max_duration = duration.amax()
 
-        # duplicate test corner for inner time step oberservation
         if duplicate_test:
             test_cond = F.pad(cond, (0, 0, cond_seq_len, max_duration - 2 * cond_seq_len), value=0.0)
 
@@ -167,66 +158,38 @@ class CFM(nn.Module):
 
         cond_mask = F.pad(cond_mask, (0, max_duration - cond_mask.shape[-1]), value=False)
         cond_mask = cond_mask.unsqueeze(-1)
-        step_cond = torch.where(
-            cond_mask, cond, torch.zeros_like(cond)
-        )  # allow direct control (cut cond audio) with lens passed in
+        step_cond = torch.where(cond_mask, cond, torch.zeros_like(cond))
 
         if batch > 1:
             mask = lens_to_mask(duration)
-        else:  # save memory and speed up, as single inference need no mask currently
+        else:
             mask = None
 
         # neural ode
-
         def fn(t, x):
-            # at each step, conditioning is fixed
-            # step_cond = torch.where(cond_mask, cond, torch.zeros_like(cond))
-            # clearing any remaing activations for safety
-            self.transformer.clear_activations()
-            # predict flow (cond)
+            if hooks_were_attached:
+                self.transformer.clear_activations()
+            # predict flow
             if cfg_strength < 1e-5:
-                pred = self.transformer(
-                    x=x,
-                    cond=step_cond,
-                    text=text,
-                    time=t,
-                    mask=mask,
-                    drop_audio_cond=False,
-                    drop_text=False,
-                    cache=True,
-                )
+                pred = self.transformer(x=x, cond=step_cond, text=text, time=t, mask=mask, drop_audio_cond=False, drop_text=False, cache=True)
             else:
-            # predict flow (cond and uncond), for classifier-free guidance
-                pred_cfg = self.transformer(
-                    x=x,
-                    cond=step_cond,
-                    text=text,
-                    time=t,
-                    mask=mask,
-                    cfg_infer=True,
-                    cache=True,
-                )
+                pred_cfg = self.transformer(x=x, cond=step_cond, text=text, time=t, mask=mask, cfg_infer=True, cache=True)
                 pred, null_pred = torch.chunk(pred_cfg, 2, dim=0)
                 pred = pred + (pred - null_pred) * cfg_strength
             
-            """
-            Adding data hooks 
-            """
-            current_time_key = f"t_{t.item():.6f}"
-            all_timestep_activations[current_time_key] = {}
+            # If hooks were requested, capture their data for this specific timestep.
+            if hooks_were_attached:
+                current_time_key = f"t_{t.item():.6f}"
+                all_timestep_activations[current_time_key] = {}
+                # Clear activations from previous step before capturing new ones
+                self.transformer.clear_activations()
+                for hook_name in capture_hooks_config.keys():
+                    if hook_name in self.transformer.extracted_activations:
+                        captured_data = self.transformer.extracted_activations[hook_name]
+                        all_timestep_activations[current_time_key][hook_name] = captured_data['tensor'].clone().cpu()
 
-            for info in hook_info:
-                hook_name = info['name']
-                module_path = info['path']
-                if hook_name in self.transformer.extracted_activations:
-                    captured_data = self.transformer.extracted_activations[hook_name]
-                    all_timestep_activations[current_time_key][module_path] = captured_data['tensor'].clone()
+            return pred
 
-            return pred 
-
-        # noise input
-        # to make sure batch inference result is same with different batch size, and for sure single inference
-        # still some difference maybe due to convolutional layers
         y0 = []
         for dur in duration:
             if exists(seed):
@@ -235,27 +198,27 @@ class CFM(nn.Module):
         y0 = pad_sequence(y0, padding_value=0, batch_first=True)
 
         t_start = 0
-
-        # duplicate test corner for inner time step oberservation
         if duplicate_test:
             t_start = t_inter
             y0 = (1 - t_start) * y0 + t_start * test_cond
             steps = int(steps * (1 - t_start))
 
-        if t_start == 0 and use_epss:  # use Empirically Pruned Step Sampling for low NFE
+        if t_start == 0 and use_epss:
             t = get_epss_timesteps(steps, device=self.device, dtype=step_cond.dtype)
         else:
             t = torch.linspace(t_start, 1, steps + 1, device=self.device, dtype=step_cond.dtype)
+        
         if sway_sampling_coef is not None:
             t = t + sway_sampling_coef * (torch.cos(torch.pi / 2 * t) - 1 + t)
 
         trajectory = odeint(fn, y0, t, **self.odeint_kwargs)
         self.transformer.clear_cache()
 
-        """
-        Cleaning all hooks 
-        """
-        self.transformer.remove_hooks()
+        # If we attached hooks for this run, make sure to clean them up.
+        if hooks_were_attached:
+            self.transformer.remove_hooks()
+            self.transformer.clear_activations()
+            print("Removed all temporary hooks.")
 
         sampled = trajectory[-1]
         out = sampled
@@ -269,13 +232,12 @@ class CFM(nn.Module):
 
     def forward(
         self,
-        inp: float["b n d"] | float["b nw"],  # mel or raw wave  # noqa: F722
-        text: int["b nt"] | list[str],  # noqa: F722
+        inp: float["b n d"] | float["b nw"],
+        text: int["b nt"] | list[str],
         *,
-        lens: int["b"] | None = None,  # noqa: F821
+        lens: int["b"] | None = None,
         noise_scheduler: str | None = None,
     ):
-        # handle raw wave
         if inp.ndim == 2:
             inp = self.mel_spec(inp)
             inp = inp.permute(0, 2, 1)
@@ -283,7 +245,6 @@ class CFM(nn.Module):
 
         batch, seq_len, dtype, device, _σ1 = *inp.shape[:2], inp.dtype, self.device, self.sigma
 
-        # handle text as string
         if isinstance(text, list):
             if exists(self.vocab_char_map):
                 text = list_str_to_idx(text, self.vocab_char_map).to(device)
@@ -291,51 +252,39 @@ class CFM(nn.Module):
                 text = list_str_to_tensor(text).to(device)
             assert text.shape[0] == batch
 
-        # lens and mask
         if not exists(lens):
             lens = torch.full((batch,), seq_len, device=device)
 
-        mask = lens_to_mask(lens, length=seq_len)  # useless here, as collate_fn will pad to max length in batch
+        mask = lens_to_mask(lens, length=seq_len)
 
-        # get a random span to mask out for training conditionally
         frac_lengths = torch.zeros((batch,), device=self.device).float().uniform_(*self.frac_lengths_mask)
         rand_span_mask = mask_from_frac_lengths(lens, frac_lengths)
 
         if exists(mask):
             rand_span_mask &= mask
 
-        # mel is x1
         x1 = inp
-
-        # x0 is gaussian noise
         x0 = torch.randn_like(x1)
 
-        # time step
         time = torch.rand((batch,), dtype=dtype, device=self.device)
-        # TODO. noise_scheduler
 
-        # sample xt (φ_t(x) in the paper)
         t = time.unsqueeze(-1).unsqueeze(-1)
         φ = (1 - t) * x0 + t * x1
         flow = x1 - x0
 
-        # only predict what is within the random mask span for infilling
         cond = torch.where(rand_span_mask[..., None], torch.zeros_like(x1), x1)
 
-        # transformer and cfg training with a drop rate
-        drop_audio_cond = random() < self.audio_drop_prob  # p_drop in voicebox paper
-        if random() < self.cond_drop_prob:  # p_uncond in voicebox paper
+        drop_audio_cond = random() < self.audio_drop_prob
+        if random() < self.cond_drop_prob:
             drop_audio_cond = True
             drop_text = True
         else:
             drop_text = False
 
-        # apply mask will use more memory; might adjust batchsize or batchsampler long sequence threshold
         pred = self.transformer(
             x=φ, cond=cond, text=text, time=time, drop_audio_cond=drop_audio_cond, drop_text=drop_text, mask=mask
         )
 
-        # flow matching loss
         loss = F.mse_loss(pred, flow, reduction="none")
         loss = loss[rand_span_mask]
 
