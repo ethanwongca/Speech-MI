@@ -9,6 +9,8 @@ d - dimension
 
 from __future__ import annotations
 
+print("\n\n<<<<<<<<<< LOADING MODIFIED CFM WITH HOOKS >>>>>>>>>>\n\n")
+
 from random import random
 from typing import Callable
 

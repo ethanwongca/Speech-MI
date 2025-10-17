@@ -1,6 +1,5 @@
-"""
-Modified utils_infer class from F5-TTS to view timesteps in DiT
-"""
+# A unified script for inference process
+# Make adjustments inside functions, and consider both gradio and cli scripts if need to change func output format
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -29,7 +28,7 @@ from pydub import AudioSegment, silence
 from transformers import pipeline
 from vocos import Vocos
 
-from models.cfm import CFM
+from f5_tts.model import CFM
 from f5_tts.model.utils import convert_char_to_pinyin, get_tokenizer
 
 
@@ -115,7 +114,7 @@ def load_vocoder(vocoder_name="vocos", is_local=False, local_path="", device=dev
             config_path = hf_hub_download(repo_id=repo_id, cache_dir=hf_cache_dir, filename="config.yaml")
             model_path = hf_hub_download(repo_id=repo_id, cache_dir=hf_cache_dir, filename="pytorch_model.bin")
         vocoder = Vocos.from_hparams(config_path)
-        state_dict = torch.load(model_path, map_location="cpu", weights_only=True)
+        state_dict = torch.load(model_path, map_location="cpu", weights_only=False)
         from vocos.feature_extractors import EncodecFeatures
 
         if isinstance(vocoder.feature_extractor, EncodecFeatures):
@@ -464,7 +463,8 @@ def infer_batch_process(
 
     generated_waves = []
     spectrograms = []
-    all_batch_activations = []
+    # MODIFIED: Initialize a variable to hold the activations
+    all_timestep_activations = {}
 
     if len(ref_text[-1].encode("utf-8")) == 1:
         ref_text = ref_text + " "
@@ -489,7 +489,8 @@ def infer_batch_process(
 
         # inference
         with torch.inference_mode():
-            generated, _, timestep_activations = model_obj.sample(
+            # MODIFIED: Unpack all three return values from the modified CFM.sample
+            generated, _, activations = model_obj.sample(
                 cond=audio,
                 text=final_text_list,
                 duration=duration,
@@ -497,7 +498,7 @@ def infer_batch_process(
                 cfg_strength=cfg_strength,
                 sway_sampling_coef=sway_sampling_coef,
             )
-            # del _
+            del _
 
             generated = generated.to(torch.float32)  # generated mel spectrogram
             generated = generated[:, ref_audio_len:, :]
@@ -514,11 +515,13 @@ def infer_batch_process(
 
             if streaming:
                 for j in range(0, len(generated_wave), chunk_size):
+                    # NOTE: Streaming mode won't yield the activations
                     yield generated_wave[j : j + chunk_size], target_sample_rate
             else:
                 generated_cpu = generated[0].cpu().numpy()
                 del generated
-                yield generated_wave, generated_cpu, timestep_activations
+                # MODIFIED: Yield the activations dictionary as the third item
+                yield generated_wave, generated_cpu, activations
 
     if streaming:
         for gen_text in progress.tqdm(gen_text_batches) if progress is not None else gen_text_batches:
@@ -530,11 +533,14 @@ def infer_batch_process(
             for future in progress.tqdm(futures) if progress is not None else futures:
                 result = future.result()
                 if result:
-                    generated_wave, generated_mel_spec, activations = next(result)
+                    # MODIFIED: Unpack the third value from the result generator
+                    generated_wave, generated_mel_spec, batch_activations = next(result)
                     generated_waves.append(generated_wave)
                     spectrograms.append(generated_mel_spec)
-                    # adding activations 
-                    all_batch_activations.append(activations)
+                    # NOTE: This will store the activations from the *last* batch if there are multiple.
+                    # For the ablation script's single-batch case, this is correct.
+                    all_timestep_activations = batch_activations
+
 
         if generated_waves:
             if cross_fade_duration <= 0:
@@ -577,10 +583,12 @@ def infer_batch_process(
             # Create a combined spectrogram
             combined_spectrogram = np.concatenate(spectrograms, axis=1)
 
-            yield final_wave, target_sample_rate, combined_spectrogram, all_batch_activations
+            # MODIFIED: Yield the activations dictionary as the fourth item
+            yield final_wave, target_sample_rate, combined_spectrogram, all_timestep_activations
 
         else:
-            yield None, target_sample_rate, None, []
+            # MODIFIED: Yield an empty dictionary for activations on failure
+            yield None, target_sample_rate, None, {}
 
 
 # remove silence from generated wav
