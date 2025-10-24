@@ -19,6 +19,7 @@ import torch.nn.functional as F
 from torch import nn
 from torch.nn.utils.rnn import pad_sequence
 from torchdiffeq import odeint
+from pathlib import Path
 
 from f5_tts.model.modules import MelSpec
 from f5_tts.model.utils import (
@@ -175,6 +176,7 @@ class HookManager:
         Attach all hooks specified in config using DiT's native hook methods.
         """
         # Get all layers to hook for EXTRACTION
+        transformer_module.clear_activations()
         layers_to_hook = self.config.get_layers_to_hook(transformer_module)
         
         if not layers_to_hook and not self.config.patches:
@@ -257,7 +259,6 @@ class HookManager:
         """
         if self._hooks_attached:
             transformer_module.remove_hooks()
-            transformer_module.clear_activations()
             
             self.config.save_metadata()
             

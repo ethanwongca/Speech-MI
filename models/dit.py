@@ -377,7 +377,7 @@ class DiT(nn.Module):
 
     # --- Main Forward Pass (with hook integration) ---
     def forward(self, x: float, cond: float, text: int, time: float, mask: bool | None = None, drop_audio_cond: bool = False, drop_text: bool = False, cfg_infer: bool = False, cache: bool = False):
-        self.clear_activations()  # Clear previous results
+        # self.clear_activations()  # Clear previous results
         batch, seq_len = x.shape[0], x.shape[1]
         if time.ndim == 0:
             time = time.repeat(batch)
