@@ -182,6 +182,128 @@ class HookConfig:
         
         return all_timesteps
 
+class HookManager:
+    """
+    Manages the CFM.sample() and uses the Hook Classes defined in DiT 
+
+    i.e. DiT contains 
+    transformer.add_extraction_hook(submodule_path, hook_name)
+    transformer.add_patch_hook(submodule_path, hook_name, **patch_kwargs)
+    transformer.remove_hooks()
+    transformer.clear_activations()
+    transformer.extracted_activations (dict)
+    """
+
+    def __init__(self, config: HookConfig):
+        self.config = config
+        self._hooks_attached = False
+        self._hook_names = []
+        self._step_counter = 0
+    
+    def setup_hooks(self, transformer_module: nn.Module):
+        """
+        Attach all hooks specified in config using DiT's native hook methods.
+        """
+        # Get all layers to hook
+        layers_to_hook = self.config.get_layers_to_hook(transformer_module)
+        
+        if not layers_to_hook:
+            print("No layers to hook!")
+            return
+        
+        print(f"\n{'='*70}")
+        print(f"HOOK SETUP")
+        print(f"{'='*70}")
+        print(f"Attaching {len(layers_to_hook)} extraction hooks:")
+        
+        # Attach extraction hooks using DiT's method
+        for hook_name, layer_path in layers_to_hook.items():
+            try:
+                transformer_module.add_extraction_hook(
+                    submodule_path=layer_path,
+                    hook_name=hook_name
+                )
+                self._hook_names.append(hook_name)
+                print(f"{hook_name:30s} → {layer_path}")
+            except Exception as e:
+                print(f"Error: {hook_name:30s} → {layer_path} (ERROR: {e})")
+        
+        # Attach patch hooks if specified using DiT's method
+        if self.config.patches:
+            print(f"\n🔧 Attaching {len(self.config.patches)} patch hooks:")
+            for hook_name, patch_kwargs in self.config.patches.items():
+                layer_path = layers_to_hook.get(hook_name)
+                if layer_path:
+                    try:
+                        transformer_module.add_patch_hook(
+                            submodule_path=layer_path,
+                            hook_name=f"{hook_name}_patch",
+                            **patch_kwargs
+                        )
+                        print(f"{hook_name}_patch → {layer_path}")
+                    except Exception as e:
+                        print(f"{hook_name}_patch → {layer_path} (ERROR: {e})")
+        
+        print(f"{'='*70}\n")
+        self._hooks_attached = True
+    
+    def capture_and_save_timestep(self, transformer_module: nn.Module, t: float) -> bool:
+        """
+        Capture activations for current timestep from DiT's extracted_activations,
+        save to disk, then clear.
+        
+        Returns True if captured, False if skipped.
+        """
+        if not self._hooks_attached:
+            return False
+        
+        step_index = self._step_counter
+        self._step_counter += 1
+        
+        # Check if we should capture this timestep
+        if not self.config.should_capture_time(t, step_index):
+            transformer_module.clear_activations()
+            return False
+        
+        # Collect all activations from DiT's extracted_activations dict
+        activations = {}
+        for hook_name in self._hook_names:
+            if hook_name in transformer_module.extracted_activations:
+                captured_data = transformer_module.extracted_activations[hook_name]
+                # DiT stores as {'tensor': ..., 'device': ..., 'shape': ..., 'call_count': ...}
+                activations[hook_name] = captured_data['tensor']
+        
+        # Save to disk if we captured anything
+        if activations:
+            self.config.save_timestep(t, step_index, activations)
+        
+        # Clear activations to free memory (uses DiT's method)
+        transformer_module.clear_activations()
+        
+        return True
+    
+    def cleanup(self, transformer_module: nn.Module):
+        """
+        Remove all hooks and save metadata using DiT's cleanup methods.
+        """
+        if self._hooks_attached:
+            # Use DiT's native cleanup methods
+            transformer_module.remove_hooks()
+            transformer_module.clear_activations()
+            
+            # Save our metadata
+            self.config.save_metadata()
+            
+            print(f"\n{'='*70}")
+            print(f"Capture complete!")
+            print(f"Total ODE steps: {self._step_counter}")
+            print(f"Timesteps saved: {len(self.config.get_saved_files())}")
+            print(f"Save directory: {self.config.save_dir}")
+            print(f"{'='*70}\n")
+            
+            self._hooks_attached = False
+
+
 
 class CFM(nn.Module):
     def __init__(
@@ -251,22 +373,15 @@ class CFM(nn.Module):
         duplicate_test=False,
         t_inter=0.1,
         edit_mask=None,
-        capture_hooks_config: dict | None = None,
+        hook_manager: HookManager | None = None,
     ):
         self.eval()
 
         all_timestep_activations = {}
         hooks_were_attached = False
 
-        # If a hook config is provided by the calling script, attach those specific hooks.
-        if capture_hooks_config:
-            hooks_were_attached = True
-            print(f"Attaching {len(capture_hooks_config)} specific hooks for this run:")
-            for hook_name, config in capture_hooks_config.items():
-                path = config.get('path')
-                if path:
-                    self.transformer.add_extraction_hook(submodule_path=path, hook_name=hook_name)
-                    print(f"  - Attached hook '{hook_name}' to layer '{path}'")
+        if hook_manager:
+            hook_manager.setup_hooks(self.transformer)
 
         if cond.ndim == 2:
             cond = self.mel_spec(cond)
@@ -328,13 +443,9 @@ class CFM(nn.Module):
                 pred = pred + (pred - null_pred) * cfg_strength
             
             # If hooks were requested, capture their data for this specific timestep.
-            if hooks_were_attached:
-                current_time_key = f"t_{t.item():.6f}"
-                all_timestep_activations[current_time_key] = {}
-                for hook_name in capture_hooks_config.keys():
-                    if hook_name in self.transformer.extracted_activations:
-                        captured_data = self.transformer.extracted_activations[hook_name]
-                        all_timestep_activations[current_time_key][hook_name] = captured_data['tensor'].clone().cpu()
+            if hook_manager:
+                t_float = t.item() if t.ndim == 0 else t[0].item()
+                hook_manager.capture_and_save_timestep(self.transformer, t_float)
 
             return pred
 
@@ -363,10 +474,8 @@ class CFM(nn.Module):
         self.transformer.clear_cache()
 
         # If we attached hooks for this run, make sure to clean them up.
-        if hooks_were_attached:
-            self.transformer.remove_hooks()
-            self.transformer.clear_activations()
-            print("Removed all temporary hooks.")
+        if hook_manager:
+            hook_manager.cleanup(self.transformer)
 
         sampled = trajectory[-1]
         out = sampled
@@ -376,7 +485,7 @@ class CFM(nn.Module):
             out = out.permute(0, 2, 1)
             out = vocoder(out)
 
-        return out, trajectory, all_timestep_activations
+        return out, trajectory
 
     def forward(
         self,
