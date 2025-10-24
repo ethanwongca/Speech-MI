@@ -31,6 +31,157 @@ from f5_tts.model.utils import (
     mask_from_frac_lengths,
 )
 
+class HookConfig:
+    """
+    Configuration object for managing hooks during ODE sampling.
+    Uses DiT's existing hook infrastructure (add_extraction_hook, add_patch_hook).
+    
+    Three simple capture modes:
+    1. capture_all_layers=True: Captures ALL transformer blocks
+    2. capture_layers: Dict of specific layers {hook_name: layer_path}
+    3. capture_final_output: Captures the final output layer
+    
+    Time filtering controls WHEN to capture (which timesteps).
+    """
+    def __init__(
+        self,
+        capture_all_layers: bool = False,
+        # Input for this is {hook_name: layer_path}
+        capture_layers: dict[str, str] | None = {}, 
+        capture_final_output: bool = False, 
+        # Invoke a  Lambda function in time filter i.e. time_filter=lambda step for step in [0, 10, 20, 31] etc 
+        time_filter: Callable[[float, int], bool] | None = None,  
+        precision: torch.dtype = torch.bfloat16,
+        device: str = 'cpu',
+        save_per_timestep: bool = True,
+        save_dir: str | Path = "./hook_captures",
+        patches: dict | None = {}
+    ): 
+        self.capture_all_layers = capture_all_layers
+        self.capture_layers = capture_layers
+        self.capture_final_output = capture_final_output
+        # Set default vlaues to capturea all time steps 
+        self.time_filter = time_filter or (lambda t, step: True)
+        self.precision = precision
+        self.device = device
+        self.save_per_timestep = save_per_timestep
+        self.save_dir = Path(save_dir)
+        if self.save_per_timestep:
+            self.save_dir.mkdir(parents=True, exist_ok=True)
+        self.patches = patches
+        self._saved_files = []
+        self._metadata = {
+            'precision': str(precision),
+            'device': device,
+            'capture_all_layers': capture_all_layers,
+            'capture_layers': list(self.capture_layers.keys()),
+            'timesteps': []
+        }
+    def should_capture_time(self, t: float, step_index: int) -> bool:
+        """Check if this timestep should be captured"""
+        return self.time_filter(t, step_index)
+    
+    def get_layers_to_hook(self, transformer_module: nn.Module) -> dict[str, str]:
+        """
+        Returns a dict of {hook_name: layer_path} for all layers to capture.
+        """
+        hooks_dict = {}
+        
+        # 1. Capture all transformer blocks if requested
+        if self.capture_all_layers:
+            if hasattr(transformer_module, 'transformer_blocks'):
+                for i, _ in enumerate(transformer_module.transformer_blocks):
+                    hooks_dict[f'block_{i}'] = f'transformer_blocks.{i}'
+        
+        # 2. Add manually specified layers
+        hooks_dict.update(self.capture_layers)
+        
+        # 3. Add final output if requested
+        if self.capture_final_output:
+            hooks_dict['final_output'] = 'proj_out'
+        
+        return hooks_dict
+    
+    def save_timestep(self, t: float, step_index: int, activations: dict[str, torch.Tensor]) -> str:
+        """
+        Saves activations for a single timestep to disk.
+        Returns the filepath where data was saved.
+        """
+        if not self.save_per_timestep:
+            return None
+        
+        timestep_data = {}
+        for hook_name, tensor in activations.items():
+            timestep_data[hook_name] = {
+                'tensor': tensor.to(self.precision).to('cpu'),
+                'shape': tuple(tensor.shape),
+                'dtype': str(tensor.dtype),
+                'original_device': str(tensor.device)
+            }
+        
+        # Create filename with timestep counter and t value
+        filename = f"timestep_{step_index:04d}_t_{t:.6f}.pt"
+        filepath = self.save_dir / filename
+        
+        # Save to disk
+        torch.save({
+            't': t,
+            'step_index': step_index,
+            'activations': timestep_data
+        }, filepath)
+        
+        # Update metadata
+        self._metadata['timesteps'].append({
+            'step_index': step_index,
+            't': t,
+            'file': filename,
+            'num_hooks': len(timestep_data)
+        })
+        
+        self._saved_files.append(str(filepath))
+        
+        print(f"Saved timestep {step_index} (t={t:.6f}) with {len(timestep_data)} hooks to {filename}")
+        
+        return str(filepath)
+    
+    def save_metadata(self):
+        """Save metadata about the capture session"""
+        if not self.save_per_timestep:
+            return
+        
+        metadata_path = self.save_dir / "capture_metadata.json"
+        with open(metadata_path, 'w') as f:
+            json.dump(self._metadata, f, indent=2)
+        
+        print(f"Saved capture metadata to {metadata_path}")
+    
+    def get_saved_files(self) -> list[str]:
+        """Returns list of all saved timestep files"""
+        return self._saved_files
+    
+    def load_timestep(self, timestep_index: int) -> dict:
+        """Load a specific timestep from disk"""
+        if timestep_index >= len(self._saved_files):
+            raise IndexError(f"Timestep {timestep_index} not found. Only {len(self._saved_files)} timesteps saved.")
+        
+        filepath = self._saved_files[timestep_index]
+        return torch.load(filepath)
+    
+    @staticmethod
+    def load_from_dir(save_dir: str | Path) -> list[dict]:
+        """
+        Load all timesteps from a directory.
+        Returns list of timestep data dicts.
+        """
+        save_dir = Path(save_dir)
+        timestep_files = sorted(save_dir.glob("timestep_*.pt"))
+        
+        all_timesteps = []
+        for filepath in timestep_files:
+            all_timesteps.append(torch.load(filepath))
+        
+        return all_timesteps
+
 
 class CFM(nn.Module):
     def __init__(
@@ -100,7 +251,6 @@ class CFM(nn.Module):
         duplicate_test=False,
         t_inter=0.1,
         edit_mask=None,
-        # MODIFICATION: New argument to control hooking externally
         capture_hooks_config: dict | None = None,
     ):
         self.eval()
