@@ -20,6 +20,7 @@ from torch import nn
 from torch.nn.utils.rnn import pad_sequence
 from torchdiffeq import odeint
 from pathlib import Path
+import json
 
 from f5_tts.model.modules import MelSpec
 from f5_tts.model.utils import (
@@ -35,7 +36,7 @@ from f5_tts.model.utils import (
 class HookConfig:
     """
     Configuration object for managing hooks during ODE sampling.
-    (Slightly modified for ablation script)
+    Modified to save each submodule activation separately.
     """
     def __init__(
         self,
@@ -95,41 +96,53 @@ class HookConfig:
         
         return hooks_dict
     
-    def save_timestep(self, t: float, step_index: int, activations: dict[str, torch.Tensor]) -> str:
+    def save_timestep(self, t: float, step_index: int, activations: dict[str, torch.Tensor]) -> list[str]:
         """
         Saves activations for a single timestep to disk.
+        Each submodule gets its own file.
+        Returns list of saved file paths.
         """
         if not self.save_per_timestep:
-            return None
+            return []
         
-        timestep_data = {}
+        saved_files = []
+        
+        # Create a subdirectory for this timestep
+        timestep_dir = self.save_dir / f"step_{step_index:04d}"
+        timestep_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Save each hook's activation as a separate file
         for hook_name, tensor in activations.items():
-            timestep_data[hook_name] = {
+            # Sanitize hook_name for filename
+            safe_hook_name = hook_name.replace('/', '_').replace('.', '_')
+            filename = f"{safe_hook_name}.pt"
+            filepath = timestep_dir / filename
+            
+            # Save individual tensor with metadata
+            torch.save({
+                't': t,
+                'step_index': step_index,
+                'hook_name': hook_name,
                 'tensor': tensor.to(self.precision).to('cpu'),
                 'shape': tuple(tensor.shape),
                 'dtype': str(tensor.dtype),
                 'original_device': str(tensor.device)
-            }
+            }, filepath)
+            
+            saved_files.append(str(filepath))
         
-        filename = f"timestep_{step_index:04d}_t_{t:.6f}.pt"
-        filepath = self.save_dir / filename
-        
-        torch.save({
-            't': t,
-            'step_index': step_index,
-            'activations': timestep_data
-        }, filepath)
-        
+        # Update metadata
         self._metadata['timesteps'].append({
             'step_index': step_index,
             't': t,
-            'file': filename,
-            'num_hooks': len(timestep_data)
+            'directory': str(timestep_dir),
+            'num_hooks': len(activations),
+            'hook_names': list(activations.keys())
         })
         
-        self._saved_files.append(str(filepath))
-        print(f"Saved timestep {step_index} (t={t:.6f}) with {len(timestep_data)} hooks to {filename}")
-        return str(filepath)
+        self._saved_files.extend(saved_files)
+        print(f"Saved timestep {step_index} (t={t:.6f}): {len(activations)} files in {timestep_dir.name}/")
+        return saved_files
     
     def save_metadata(self):
         """Save metadata about the capture session"""
@@ -144,25 +157,57 @@ class HookConfig:
     def get_saved_files(self) -> list[str]:
         return self._saved_files
     
-    def load_timestep(self, timestep_index: int) -> dict:
-        if timestep_index >= len(self._saved_files):
-            raise IndexError(f"Timestep {timestep_index} not found. Only {len(self._saved_files)} timesteps saved.")
-        filepath = self._saved_files[timestep_index]
+    def load_hook_at_timestep(self, timestep_index: int, hook_name: str) -> dict:
+        """Load a specific hook's activation from a specific timestep"""
+        if timestep_index >= len(self._metadata['timesteps']):
+            raise IndexError(f"Timestep {timestep_index} not found.")
+        
+        timestep_info = self._metadata['timesteps'][timestep_index]
+        timestep_dir = Path(timestep_info['directory'])
+        safe_hook_name = hook_name.replace('/', '_').replace('.', '_')
+        filepath = timestep_dir / f"{safe_hook_name}.pt"
+        
+        if not filepath.exists():
+            raise FileNotFoundError(f"Hook {hook_name} not found at timestep {timestep_index}")
+        
         return torch.load(filepath)
     
+    def load_all_hooks_at_timestep(self, timestep_index: int) -> dict[str, torch.Tensor]:
+        """Load all hook activations from a specific timestep"""
+        if timestep_index >= len(self._metadata['timesteps']):
+            raise IndexError(f"Timestep {timestep_index} not found.")
+        
+        timestep_info = self._metadata['timesteps'][timestep_index]
+        timestep_dir = Path(timestep_info['directory'])
+        
+        activations = {}
+        for hook_name in timestep_info['hook_names']:
+            safe_hook_name = hook_name.replace('/', '_').replace('.', '_')
+            filepath = timestep_dir / f"{safe_hook_name}.pt"
+            data = torch.load(filepath)
+            activations[hook_name] = data['tensor']
+        
+        return activations
+    
     @staticmethod
-    def load_from_dir(save_dir: str | Path) -> list[dict]:
+    def load_from_dir(save_dir: str | Path) -> dict:
+        """Load metadata and return structure for accessing saved tensors"""
         save_dir = Path(save_dir)
-        timestep_files = sorted(save_dir.glob("timestep_*.pt"))
-        all_timesteps = []
-        for filepath in timestep_files:
-            all_timesteps.append(torch.load(filepath))
-        return all_timesteps
+        metadata_path = save_dir / "capture_metadata.json"
+        
+        if not metadata_path.exists():
+            raise FileNotFoundError(f"No metadata found in {save_dir}")
+        
+        with open(metadata_path, 'r') as f:
+            metadata = json.load(f)
+        
+        return metadata
+
 
 class HookManager:
     """
     Manages the CFM.sample() hooks.
-    (Slightly modified for ablation script)
+    Modified to save per-submodule files.
     """
 
     def __init__(self, config: HookConfig):
@@ -175,7 +220,6 @@ class HookManager:
         """
         Attach all hooks specified in config using DiT's native hook methods.
         """
-        # Get all layers to hook for EXTRACTION
         transformer_module.clear_activations()
         layers_to_hook = self.config.get_layers_to_hook(transformer_module)
         
@@ -201,11 +245,10 @@ class HookManager:
                 except Exception as e:
                     print(f"Error: {hook_name:30s} → {layer_path} (ERROR: {e})")
         
-        # Attach patch hooks (modified to read path from config dict)
+        # Attach patch hooks
         if self.config.patches:
             print(f"Attaching {len(self.config.patches)} patch hooks:")
             for hook_name, patch_config in self.config.patches.items():
-                # Get path and kwargs from the patch_config dict
                 layer_path = patch_config.get('path')
                 patch_kwargs = patch_config.get('kwargs', {})
                 
@@ -225,7 +268,7 @@ class HookManager:
     
     def capture_and_save_timestep(self, transformer_module: nn.Module, t: float) -> bool:
         """
-        Capture activations, save to disk (if configured), and clear (if configured).
+        Capture activations, save each to separate file, and clear.
         """
         if not self._hooks_attached:
             return False
@@ -233,18 +276,17 @@ class HookManager:
         step_index = self._step_counter
         self._step_counter += 1
         
-        # Check if we should capture (e.g., save) this timestep
         should_capture = self.config.should_capture_time(t, step_index)
         
         if should_capture and self.config.save_per_timestep:
-            # Collect all activations from DiT's extracted_activations dict
+            # Collect all activations
             activations = {}
             for hook_name in self._hook_names:
                 if hook_name in transformer_module.extracted_activations:
                     captured_data = transformer_module.extracted_activations[hook_name]
                     activations[hook_name] = captured_data['tensor']
             
-            # Save to disk if we captured anything
+            # Save each activation to its own file
             if activations:
                 self.config.save_timestep(t, step_index, activations)
         
@@ -259,13 +301,12 @@ class HookManager:
         """
         if self._hooks_attached:
             transformer_module.remove_hooks()
-            
             self.config.save_metadata()
             
             print(f"\n{'='*70}")
             print(f"Capture complete!")
             print(f"Total ODE steps: {self._step_counter}")
-            print(f"Timesteps saved: {len(self.config.get_saved_files())}")
+            print(f"Total files saved: {len(self.config.get_saved_files())}")
             print(f"Save directory: {self.config.save_dir}")
             print(f"{'='*70}\n")
             
