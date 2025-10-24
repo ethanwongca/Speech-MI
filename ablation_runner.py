@@ -13,9 +13,35 @@ from datetime import datetime
 import json
 import soundfile as sf
 
+from f5_tts.model.cfm import HookConfig, HookManager
 # Add parent directories to path
 current_dir = Path(__file__).parent
 sys.path.insert(0, str(current_dir.parent))
+
+def time_filter_all():
+    """Capture all timesteps"""
+    return lambda t, step: True
+
+
+def time_filter_every_nth(n: int):
+    """Capture every Nth timestep"""
+    return lambda t, step: step % n == 0
+
+
+def time_filter_specific_steps(steps: list[int]):
+    """Capture only specific timestep indices"""
+    steps_set = set(steps)
+    return lambda t, step: step in steps_set
+
+
+def time_filter_time_range(t_min: float, t_max: float):
+    """Capture timesteps within a time range"""
+    return lambda t, step: t_min <= t <= t_max
+
+
+def time_filter_endpoints(early: float = 0.2, late: float = 0.8):
+    """Capture early and late timesteps"""
+    return lambda t, step: t < early or t > late
 
 def run_ablation_experiment(
     model, 
@@ -29,22 +55,7 @@ def run_ablation_experiment(
 ):
     """
     Run a single ablation experiment on DiT model.
-    
-    Args:
-        model: The loaded F5-TTS model with DiT backbone
-        vocoder: Loaded vocoder
-        ref_audio, ref_text, gen_text: Input data
-        experiment_name: Name for this experiment
-        ablation_config: Dict with hook configuration
-            Example: {
-                'hook_name': {
-                    'type': 'zero_out' | 'constant' | 'extract',
-                    'path': 'transformer_blocks.0',
-                    'value': 0.0 (for constant type),
-                    'batch_index': None or int,
-                    'feature_index': None or int
-                }
-            }
+    (REFACTORED to use HookManager)
     """
     from f5_tts.infer.utils_infer import infer_process
     
@@ -52,14 +63,12 @@ def run_ablation_experiment(
     print(f"EXPERIMENT: {experiment_name}")
     print(f"{'='*70}")
     
-    # Access the DiT model (it's nested deeper in F5-TTS structure)
-    # F5-TTS structure: EMA -> CFM -> DiT (transformer)
+    # Access the DiT model
     dit_model = None
     if hasattr(model, 'ema_model'):
-        # model is EMA wrapper
         cfm_model = model.ema_model
         if hasattr(cfm_model, 'transformer'):
-            dit_model = cfm_model.transformer  # This is the actual DiT
+            dit_model = cfm_model.transformer
         else:
             dit_model = cfm_model
     elif hasattr(model, 'transformer'):
@@ -69,80 +78,97 @@ def run_ablation_experiment(
     
     print(f"DiT model type: {type(dit_model).__name__}")
     
-    # Clear any existing hooks
-    if hasattr(dit_model, 'remove_hooks'):
-        dit_model.remove_hooks()
-        dit_model.clear_activations()
-        print("Cleared existing hooks")
+    # --- REFACTOR ---
+    # Instead of manual hooking, we build a HookConfig and HookManager
     
-    # Apply ablation hooks if specified
+    # 1. Parse the ablation_config into HookConfig inputs
+    patches_dict = {}
+    capture_layers_dict = {}
+    is_extracting = False
+
     if ablation_config:
-        print(f"\nApplying {len(ablation_config)} hook(s):")
+        print(f"\nParsing {len(ablation_config)} hook(s):")
         for hook_name, hook_config in ablation_config.items():
             hook_type = hook_config['type']
             path = hook_config['path']
             
             if hook_type in ['zero_out', 'constant']:
-                value = hook_config.get('value', 0.0)
-                dit_model.add_patch_hook(
-                    submodule_path=path,
-                    hook_name=hook_name,
-                    batch_index=hook_config.get('batch_index'),
-                    feature_index=hook_config.get('feature_index'),
-                    output_index=hook_config.get('output_index', 0),
-                    patch_vec=value
-                )
-                print(f"  - {hook_name}: Patch '{path}' with value={type(value)}")
-                
+                # This is a patch
+                patch_kwargs = {
+                    'batch_index': hook_config.get('batch_index'),
+                    'feature_index': hook_config.get('feature_index'),
+                    'output_index': hook_config.get('output_index', 0),
+                    'patch_vec': hook_config.get('value', 0.0)
+                }
+                patches_dict[hook_name] = {'path': path, 'kwargs': patch_kwargs}
+                print(f"  - {hook_name}: Patch '{path}'")
+
             elif hook_type == 'extract':
-                dit_model.add_extraction_hook(
-                    submodule_path=path,
-                    hook_name=hook_name,
-                    output_index=hook_config.get('output_index', 0)
-                )
+                # This is an extraction
+                capture_layers_dict[hook_name] = path
+                is_extracting = True
                 print(f"  - {hook_name}: Extract from '{path}'")
+
+    # 2. Create HookConfig
+    #    If is_extracting, we must set clear_activations_per_step=False
+    #    so we can read the final values from extracted_activations.
+    hook_cfg = HookConfig(
+        capture_layers=capture_layers_dict,
+        patches=patches_dict,
+        save_per_timestep=False, # We don't want to save files per step
+        clear_activations_per_step=(not is_extracting)
+    )
+    
+    # 3. Create HookManager
+    hook_manager = HookManager(hook_cfg)
+    
+    # 4. Add HookManager to inference_kwargs
+    #    This will be picked up by the modified CFM.sample()
+    inference_kwargs['hook_manager'] = hook_manager
     
     # Run inference
     try:
-        audio_segment, sample_rate, spectrogram, timeste_activations = infer_process(
+        audio_segment, sample_rate, spectrogram = infer_process(
             ref_audio, ref_text, gen_text, model, vocoder, **inference_kwargs
         )
         
-        # Collect activation statistics if hooks were used
+        # Collect activation statistics if we were extracting
         activation_stats = {}
-        hook_stats = {}
-        
-        # <<< MODIFIED: Also capture the raw tensors for re-insertion experiments
         captured_tensors = {}
-        if hasattr(dit_model, 'extracted_activations'):
-            captured_tensors = dit_model.extracted_activations
-            for name, data in captured_tensors.items():
-                tensor = data['tensor']
-                activation_stats[name] = {
-                    'shape': list(data['shape']),
-                    'mean': float(tensor.mean()),
-                    'std': float(tensor.std()),
-                    'min': float(tensor.min()),
-                    'max': float(tensor.max()),
-                    'call_count': data.get('call_count', 0)
-                }
         
-        if hasattr(dit_model, 'get_hook_stats'):
-            hook_stats = dit_model.get_hook_stats()
+        if is_extracting:
+            print("Collecting final extracted activations...")
+            if hasattr(dit_model, 'extracted_activations'):
+                captured_tensors = dit_model.extracted_activations
+                for name, data in captured_tensors.items():
+                    if 'tensor' in data: # Check if tensor data exists
+                        tensor = data['tensor']
+                        activation_stats[name] = {
+                            'shape': list(data.get('shape', tensor.shape)),
+                            'mean': float(tensor.mean()),
+                            'std': float(tensor.std()),
+                            'min': float(tensor.min()),
+                            'max': float(tensor.max()),
+                            'call_count': data.get('call_count', 'N/A')
+                        }
+                    else:
+                        activation_stats[name] = {'error': 'No tensor data found'}
+            else:
+                print("Warning: 'extracted_activations' attribute not found on DiT model.")
+
         
         print(f"\nResult: SUCCESS")
         print(f"  Audio length: {len(audio_segment)/sample_rate:.2f}s")
         print(f"  Sample rate: {sample_rate}")
         if activation_stats:
-            print(f"  Captured {len(activation_stats)} activations")
+            print(f"  Captured {len(activation_stats)} activations (final step)")
         
         return {
             'audio': audio_segment,
             'sample_rate': sample_rate,
             'spectrogram': spectrogram,
             'activation_stats': activation_stats,
-            'hook_stats': hook_stats,
-            'captured_tensors': captured_tensors, # <<< MODIFIED: Return the raw tensors
+            'captured_tensors': captured_tensors,
             'success': True,
             'error': None
         }
@@ -157,14 +183,13 @@ def run_ablation_experiment(
             'spectrogram': None,
             'activation_stats': {},
             'hook_stats': {},
-            'captured_tensors': {}, # <<< MODIFIED: Return empty dict on failure
+            'captured_tensors': {},
             'success': False,
             'error': str(e)
         }
-    finally:
-        # Clean up hooks
-        if hasattr(dit_model, 'remove_hooks'):
-            dit_model.remove_hooks()
+    # finally:
+    #   No finally block needed! The HookManager, called by CFM.sample,
+    #   handles its own cleanup (including hook removal).
 
 def define_ablation_experiments():
     """
@@ -187,7 +212,7 @@ def define_ablation_experiments():
         "03_zero_block_last": {
             "zero_blast": {
                 "type": "zero_out",
-                "path": "transformer_blocks.23",  # <<< MODIFIED: Corrected to the actual last block
+                "path": "transformer_blocks.23",  # Assuming 24 blocks
                 "value": 0.0
             }
         },
@@ -273,11 +298,11 @@ def define_ablation_experiments():
             },
             "ext_b_mid": {
                 "type": "extract",
-                "path": "transformer_blocks.11" # <<< MODIFIED: Adjusted for 24 blocks
+                "path": "transformer_blocks.11"
             },
             "ext_b_last": {
                 "type": "extract",
-                "path": "transformer_blocks.23" # <<< MODIFIED: Adjusted for 24 blocks
+                "path": "transformer_blocks.23"
             }
         }
     }
@@ -303,7 +328,7 @@ def save_results(results, output_dir, gen_text):
             'success': result['success'],
             'error': result['error'],
             'activation_stats': result['activation_stats'],
-            'hook_stats': result['hook_stats']
+            # 'hook_stats' removed as it's part of the old system
         }
         
         if result['success'] and result['audio'] is not None:
@@ -341,9 +366,12 @@ def save_results(results, output_dir, gen_text):
             if result['error']:
                 f.write(f"Error: {result['error']}\n")
             if result['activation_stats']:
-                f.write(f"\nActivation Statistics:\n")
+                f.write(f"\nActivation Statistics (final step):\n")
                 for name, stats in result['activation_stats'].items():
                     f.write(f"  {name}:\n")
+                    if 'error' in stats:
+                        f.write(f"    Error: {stats['error']}\n")
+                        continue
                     f.write(f"    Shape: {stats['shape']}\n")
                     f.write(f"    Mean: {stats['mean']:.6f}\n")
                     f.write(f"    Std: {stats['std']:.6f}\n")
@@ -370,26 +398,22 @@ def main():
     model_name = "F5TTS_v1_Base"
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    # LOCAL PATHS - update these to your local checkpoint locations
+    # LOCAL PATHS - update these
     LOCAL_MODEL_PATH = "/home/ewong/links/scratch/checkpoints/F5-TTS/F5TTS_v1_Base/model_1250000.safetensors"
     LOCAL_VOCODER_PATH = "/home/ewong/links/scratch/checkpoints/vocos-mel-24khz"
     
-    # Check if local files exist
     if not Path(LOCAL_MODEL_PATH).exists():
         print(f"ERROR: Model checkpoint not found at {LOCAL_MODEL_PATH}")
-        print("Please download using the commands provided.")
         return
     
     if not Path(LOCAL_VOCODER_PATH).exists():
         print(f"ERROR: Vocoder not found at {LOCAL_VOCODER_PATH}")
-        print("Please download using the commands provided.")
         return
     
     print(f"Device: {device}")
     print(f"Loading model from: {LOCAL_MODEL_PATH}")
     print(f"Loading vocoder from: {LOCAL_VOCODER_PATH}\n")
     
-    # Load vocoder
     print("Loading vocoder...")
     vocoder = load_vocoder(
         vocoder_name="vocos", 
@@ -399,11 +423,14 @@ def main():
     )
     print("Vocoder loaded\n")
     
-    # Load F5-TTS model
     print("Loading F5-TTS model...")
     model_cfg = OmegaConf.load(
         str(files("f5_tts").joinpath(f"configs/{model_name}.yaml"))
     )
+    
+    # --- IMPORTANT ---
+    # This assumes your environment is set up so that this import
+    # loads the *MODIFIED* CFM.py (File 1) that accepts 'hook_manager'
     model_cls = get_class(f"f5_tts.model.{model_cfg.model.backbone}")
     model_arch = model_cfg.model.arch
     
@@ -413,7 +440,6 @@ def main():
     )
     print("Model loaded with DiT backbone\n")
     
-    # Print DiT structure - navigate to the actual DiT
     cfm_model = model.ema_model if hasattr(model, 'ema_model') else model
     dit_model = cfm_model.transformer if hasattr(cfm_model, 'transformer') else cfm_model
     
@@ -429,11 +455,8 @@ def main():
     ref_audio = "Original Speech and Text/84_121123_000008_000000.wav"
     ref_text_file = "Original Speech and Text/84_121123_000008_000000.normalized.txt"
     
-    # Check if files exist
     if not Path(ref_audio).exists() or not Path(ref_text_file).exists():
         print(f"ERROR: Reference files not found")
-        print(f"  Audio: {ref_audio}")
-        print(f"  Text: {ref_text_file}")
         return
     
     with open(ref_text_file, 'r', encoding='utf-8') as f:
@@ -445,7 +468,6 @@ def main():
     print(f"Reference text: {ref_text[:50]}...")
     print(f"Generation text: {gen_text}\n")
     
-    # Preprocess reference audio
     ref_audio, ref_text = preprocess_ref_audio_text(ref_audio, ref_text)
     
     # Define experiments
@@ -462,9 +484,10 @@ def main():
         'speed': 1.0,
         'fix_duration': None,
         'device': device
+        # 'hook_manager' will be added here by run_ablation_experiment
     }
     
-    # <<< MODIFIED: STAGE 1 - CAPTURE THE BASELINE ACTIVATION ---
+    # STAGE 1 - CAPTURE THE BASELINE ACTIVATION
     print("\n" + "="*70)
     print("STAGE 1: Capturing baseline activation from 'transformer_blocks.0'")
     print("="*70)
@@ -481,9 +504,10 @@ def main():
         ablation_config=capture_config, **inference_params
     )
     
-    captured_tensor = capture_result.get('captured_tensors', {})\
-                                    .get('capture_b0', {})\
-                                    .get('tensor')
+    captured_tensor_data = capture_result.get('captured_tensors', {})\
+                                         .get('capture_b0', {})
+    
+    captured_tensor = captured_tensor_data.get('tensor')
 
     if captured_tensor is None:
         print("ERROR: Failed to capture the activation tensor. Aborting.")
@@ -491,7 +515,7 @@ def main():
         
     print(f"Successfully captured tensor with shape: {captured_tensor.shape}")
 
-    # <<< MODIFIED: STAGE 2 - ADD THE 'RE-INSERT' EXPERIMENT ---
+    # STAGE 2 - ADD THE 'RE-INSERT' EXPERIMENT
     print("\n" + "="*70)
     print("STAGE 2: Defining and running ablation experiments")
     print("="*70)
@@ -511,7 +535,7 @@ def main():
         }
     }
     
-    # <<< MODIFIED: STAGE 3 - RUN ALL EXPERIMENTS ---
+    # STAGE 3 - RUN ALL EXPERIMENTS
     results = {}
     # We can save the capture run's result if we want
     results["00_capture_run"] = capture_result 
