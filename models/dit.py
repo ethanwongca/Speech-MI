@@ -37,7 +37,7 @@ class FeatureExtractionHook:
         is_tuple = isinstance(output, tuple)
         target_tensor = output[self.output_index] if is_tuple else output
         self.storage[self.name] = {
-            'tensor': target_tensor.clone().detach().cpu(),
+            'tensor': target_tensor.clone().detach().cpu().bfloat16(),
             'device': str(target_tensor.device),
             'shape': tuple(target_tensor.shape),
             'call_count': self.call_count
