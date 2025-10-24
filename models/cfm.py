@@ -377,9 +377,6 @@ class CFM(nn.Module):
     ):
         self.eval()
 
-        all_timestep_activations = {}
-        hooks_were_attached = False
-
         if hook_manager:
             hook_manager.setup_hooks(self.transformer)
 
@@ -432,8 +429,6 @@ class CFM(nn.Module):
 
         # neural ode
         def fn(t, x):
-            if hooks_were_attached:
-                self.transformer.clear_activations()
             # predict flow
             if cfg_strength < 1e-5:
                 pred = self.transformer(x=x, cond=step_cond, text=text, time=t, mask=mask, drop_audio_cond=False, drop_text=False, cache=True)
