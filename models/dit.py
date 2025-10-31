@@ -444,4 +444,3 @@ class DiT(nn.Module):
         x = self.norm_out(x, t)
         output = self.proj_out(x)
         return output
-

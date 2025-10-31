@@ -50,7 +50,7 @@ class HookConfig:
         save_dir: str | Path = "./hook_captures",
         patches: dict[int, list[dict]] | None = {},
         clear_activations_per_step: bool = True
-    ):
+    ): 
         self.capture_all_layers = capture_all_layers
         self.capture_layers = capture_layers
         self.capture_final_output = capture_final_output
