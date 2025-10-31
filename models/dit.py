@@ -45,19 +45,38 @@ class FeatureExtractionHook:
 
 class FeaturePatchHook:
     """Creates a PyTorch forward hook to modify (patch) a module's output tensor."""
-    def __init__(self, batch_index: int | None = None, feature_index: int | None = None, 
-                 output_index: int = 0, patch_vec: torch.Tensor | float = 0.0):
+    def __init__(self, 
+                 batch_index: int | None = None, feature_index: int | None = None, 
+                 output_index: int = 0, patch_vec: torch.Tensor | float = 0.0,
+                 # Testing: Extraction args ===
+                 storage: dict | None = None, 
+                 extract_name_before: str | None = None,
+                 extract_name_after: str | None = None
+                 ):
         self.batch_index = batch_index
         self.feature_index = feature_index
         self.output_index = output_index
         self.patch_vec = patch_vec
         self.call_count = 0
+        # Testing : Extraction args ===
+        self.storage = storage
+        self.extract_name_before = extract_name_before
+        self.extract_name_after = extract_name_after
 
     def __call__(self, module, input, output):
         self.call_count += 1
         is_tuple = isinstance(output, tuple)
         target_tensor = output[self.output_index] if is_tuple else output
         patched_tensor = target_tensor.clone()
+
+        # Testing 
+        if self.storage is not None and self.extract_name_before:
+            self.storage[self.extract_name_before] = {
+                'tensor': target_tensor.clone().detach().cpu().bfloat16(),
+                'device': str(target_tensor.device),
+                'shape': tuple(target_tensor.shape),
+                'call_count': self.call_count
+            }
 
         # Ensure patch_vec is on the correct device
         if isinstance(self.patch_vec, torch.Tensor):
@@ -70,7 +89,25 @@ class FeaturePatchHook:
         elif patched_tensor.ndim == 2:  # (batch, feature)
             self._patch_2d(patched_tensor, patch_vec)
         else:
+            # TESITNG
+            if self.storage is not None and self.extract_name_after:
+                self.storage[self.extract_name_after] = {
+                    'tensor': patched_tensor.clone().detach().cpu().bfloat16(),
+                    'device': str(patched_tensor.device),
+                    'shape': tuple(patched_tensor.shape),
+                    'call_count': self.call_count
+                }
             return output
+
+        # TESTING
+        if self.storage is not None and self.extract_name_after:
+             self.storage[self.extract_name_after] = {
+                'tensor': patched_tensor.clone().detach().cpu().bfloat16(),
+                'device': str(patched_tensor.device),
+                'shape': tuple(patched_tensor.shape),
+                'call_count': self.call_count
+             }
+
 
         if is_tuple:
             output_list = list(output)
@@ -275,6 +312,9 @@ class DiT(nn.Module):
             self.hook_handles[hook_name].remove()
         try:
             submodule = self._get_submodule(submodule_path)
+            #TESTING CODE 
+            patch_kwargs['storage'] = self.extracted_activations
+
             hook_obj = FeaturePatchHook(**patch_kwargs)
             handle = submodule.register_forward_hook(hook_obj)
             self.hook_handles[hook_name] = handle

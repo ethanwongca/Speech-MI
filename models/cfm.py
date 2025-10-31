@@ -48,9 +48,9 @@ class HookConfig:
         device: str = 'cpu',
         save_per_timestep: bool = True,
         save_dir: str | Path = "./hook_captures",
-        patches: dict | None = {},
+        patches: dict[int, list[dict]] | None = {},
         clear_activations_per_step: bool = True
-    ): 
+    ):
         self.capture_all_layers = capture_all_layers
         self.capture_layers = capture_layers
         self.capture_final_output = capture_final_output
@@ -61,6 +61,20 @@ class HookConfig:
         self.save_dir = Path(save_dir)
         if self.save_per_timestep:
             self.save_dir.mkdir(parents=True, exist_ok=True)
+        """
+        Patches to apply at specific step indices.
+        Format: {
+            step_index (int): [
+                {'path': 'submodule.path', 'kwargs': {...patch_hook_args...}},
+                ...
+            ]
+        }
+        e.g.: { 
+            10: [ 
+                {'path': 'transformer_blocks.5.attn.to_q', 'kwargs': {'patch_vec': 0.0}} 
+            ] 
+        }
+        """
         self.patches = patches
         self.clear_activations_per_step = clear_activations_per_step
         
@@ -99,7 +113,7 @@ class HookConfig:
     def save_timestep(self, t: float, step_index: int, activations: dict[str, torch.Tensor]) -> list[str]:
         """
         Saves activations for a single timestep to disk.
-        Each submodule gets its own file.
+        Each submodule gets its own file to prevent OOM.
         Returns list of saved file paths.
         """
         if not self.save_per_timestep:
@@ -215,6 +229,7 @@ class HookManager:
         self._hooks_attached = False
         self._hook_names = []
         self._step_counter = 0
+        self._active_patch_hooks: list[str] = []
     
     def setup_hooks(self, transformer_module: nn.Module):
         """
@@ -245,32 +260,57 @@ class HookManager:
                 except Exception as e:
                     print(f"Error: {hook_name:30s} → {layer_path} (ERROR: {e})")
         
-        # Attach patch hooks
-        if self.config.patches:
-            print(f"Attaching {len(self.config.patches)} patch hooks:")
-            for hook_name, patch_config in self.config.patches.items():
-                layer_path = patch_config.get('path')
-                patch_kwargs = patch_config.get('kwargs', {})
-                
-                if layer_path:
-                    try:
-                        transformer_module.add_patch_hook(
-                            submodule_path=layer_path,
-                            hook_name=f"{hook_name}_patch",
-                            **patch_kwargs
-                        )
-                        print(f"{hook_name}_patch: {layer_path}")
-                    except Exception as e:
-                        print(f"{hook_name}_patch: {layer_path} (ERROR: {e})")
-        
         print(f"{'='*70}\n")
         self._hooks_attached = True
     
+    def manage_per_step_hooks(self, transformer_module: nn.Module, t: float, step_index: int):
+        """
+        Removes patch hooks from the previous step and applies new ones for the current step.
+        """
+        # 1. Remove patch hooks from the *previous* step
+        # We use transformer_module.hook_handles as the source of truth
+        for hook_name in self._active_patch_hooks:
+            if hook_name in transformer_module.hook_handles:
+                transformer_module.hook_handles[hook_name].remove()
+                del transformer_module.hook_handles[hook_name]
+                if hook_name in transformer_module.hook_objects:
+                    del transformer_module.hook_objects[hook_name]
+        self._active_patch_hooks.clear()
+
+        # 2. Check for new patch hooks for *this* step
+        patches_for_this_step = self.config.patches.get(step_index, [])
+        
+        if not patches_for_this_step:
+            return  # No patches for this step
+
+        # 3. Add new patch hooks
+        for i, patch_config in enumerate(patches_for_this_step):
+            layer_path = patch_config.get('path')
+            patch_kwargs = patch_config.get('kwargs', {})
+            
+            if not layer_path:
+                print(f"  [HookManager] Skipping patch {i} at step {step_index}: 'path' not specified.")
+                continue
+                
+            # Create a unique, temporary hook name
+            hook_name = f"__patch_step{step_index}_idx{i}"
+            
+            try:
+                transformer_module.add_patch_hook(
+                    submodule_path=layer_path,
+                    hook_name=hook_name,
+                    **patch_kwargs
+                )
+                # Add to our list to be removed next step
+                self._active_patch_hooks.append(hook_name) 
+            except Exception as e:
+                print(f"  [HookManager] ERROR adding patch '{hook_name}' to '{layer_path}': {e}")
+
     def capture_and_save_timestep(self, transformer_module: nn.Module, t: float) -> bool:
         """
         Capture activations, save each to separate file, and clear.
         """
-        if not self._hooks_attached:
+        if not self._hooks_attached and not self.config.patches:
             return False
         
         step_index = self._step_counter
@@ -299,9 +339,13 @@ class HookManager:
         """
         Remove all hooks and save metadata.
         """
-        if self._hooks_attached:
+        if self._hooks_attached or self._active_patch_hooks:
+            # This removes both extraction and any lingering patch hooks
             transformer_module.remove_hooks()
-            self.config.save_metadata()
+            self._active_patch_hooks.clear() # Clear the internal tracker
+
+            if self.config.save_per_timestep:
+                self.config.save_metadata()
             
             print(f"\n{'='*70}")
             print(f"Capture complete!")
@@ -437,6 +481,10 @@ class CFM(nn.Module):
 
         # neural ode
         def fn(t, x):
+            t_float = t.item() if t.ndim == 0 else t[0].item()
+            if hook_manager:
+                current_step_index = hook_manager._step_counter
+                hook_manager.manage_per_step_hooks(self.transformer, t_float, current_step_index)
             # predict flow
             if cfg_strength < 1e-5:
                 pred = self.transformer(x=x, cond=step_cond, text=text, time=t, mask=mask, drop_audio_cond=False, drop_text=False, cache=True)
@@ -447,7 +495,6 @@ class CFM(nn.Module):
             
             # If hooks were requested, capture their data for this specific timestep.
             if hook_manager:
-                t_float = t.item() if t.ndim == 0 else t[0].item()
                 hook_manager.capture_and_save_timestep(self.transformer, t_float)
 
             return pred
