@@ -1,10 +1,17 @@
 """
-Fixed OLD CFM system with proper memory management
+CFM Code with hooks
+
+ein notation:
+b - batch
+n - sequence
+nt - text sequence
+nw - raw wave length
+d - dimension
 """
 
 from __future__ import annotations
 
-print("\n\n<<<<<<<<<< LOADING FIXED CFM WITH PROPER MEMORY MANAGEMENT >>>>>>>>>>\n\n")
+print("\n\n<<<<<<<<<< Loading CFM with Hooks >>>>>>>>>>\n\n")
 
 from random import random
 from typing import Callable
