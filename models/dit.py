@@ -2,19 +2,20 @@
 DiT Model with Hooks
 
 ein notation:
-b - batch
-n - sequence
+b  - batch
+n  - sequence
 nt - text sequence
 nw - raw wave length
-d - dimension
+d  - dimension
 """
+
 from __future__ import annotations
 
 print("\n\n<<<<<<<<<< Loading DiT Model with Hooks >>>>>>>>>>\n\n")
 
 import torch
-import torch.nn.functional as F
 from torch import nn
+import torch.nn.functional as F
 from x_transformers.x_transformers import RotaryEmbedding
 
 from f5_tts.model.modules import (
@@ -28,35 +29,79 @@ from f5_tts.model.modules import (
 )
 
 
+# ======================================================================
+#   HOOK OBJECTS
+# ======================================================================
+
 class FeatureExtractionHook:
-    """Captures module output with proper memory management."""
-    
+    """
+    Lightweight forward hook used for activation **extraction only**.
+
+    Responsibilities:
+      - Run during the forward pass of a module.
+      - Collect the output tensor at `output_index`.
+      - Store a CPU-safe, detached clone in the provided storage dict.
+
+    The stored payload uses the format:
+        storage[name] = {
+            "tensor": <bfloat16 CPU tensor>,
+            "device": "<original device>",
+            "shape": (<shape>),
+            "call_count": <int>
+        }
+    """
+
     def __init__(self, storage: dict, name: str, output_index: int = 0):
+        """
+        Args:
+            storage: Dict to store extracted activations into.
+            name: Unique key used inside storage.
+            output_index: For modules that return tuples (e.g., (x, aux)).
+        """
         self.storage = storage
         self.name = name
         self.output_index = output_index
         self.call_count = 0
-    
-    def __call__(self, module, input, output):
+
+    def __call__(self, module, inputs, outputs):
         """
-        Forward hook entry.
-        Invokes PyTorch's forward hook, and saves the tensor
+        Forward hook callback.
+        Automatically executed by PyTorch during module.forward().
+
+        Stores a fully detached, cloned, CPU/bfloat16 copy.
         """
         self.call_count += 1
-        is_tuple = isinstance(output, tuple)
-        target_tensor = output[self.output_index] if is_tuple else output
+
+        is_tuple = isinstance(outputs, tuple)
+        target = outputs[self.output_index] if is_tuple else outputs
+
         with torch.no_grad():
-            safe_tensor = target_tensor.detach().clone().cpu().to(torch.bfloat16)
-        
+            safe_tensor = (
+                target.detach()
+                .clone()
+                .cpu()
+                .to(torch.bfloat16)
+            )
+
         self.storage[self.name] = {
-            'tensor': safe_tensor,
-            'device': str(target_tensor.device),
-            'shape': tuple(target_tensor.shape),
-            'call_count': self.call_count
+            "tensor": safe_tensor,
+            "device": str(target.device),
+            "shape": tuple(target.shape),
+            "call_count": self.call_count,
         }
 
+
 class FeaturePatchHook:
-    """Modifies and/or extracts activations during the forward pass."""
+    """
+    Forward hook that **modifies** (patches) activation tensors
+    and can optionally store "before" and/or "after" snapshots.
+
+    Responsibilities:
+      - Clone the activation tensor.
+      - Apply patching along batch or feature dimensions.
+      - Replace the module's output with patched version.
+      - Optionally save pre- and post-patch activations.
+    """
 
     def __init__(
         self,
@@ -68,131 +113,177 @@ class FeaturePatchHook:
         extract_name_before: str | None = None,
         extract_name_after: str | None = None,
     ):
+        """
+        Args:
+            batch_index: Which batch dimension to patch (None = all).
+            feature_index: Which feature dimension to patch.
+            output_index: Which output to patch if module returns a tuple.
+            patch_vec: Value or tensor to apply as the patch.
+            storage: Optional dict to store before/after snapshots.
+            extract_name_before: Key for recording pre-patch tensor.
+            extract_name_after: Key for recording post-patch tensor.
+        """
         self.batch_index = batch_index
         self.feature_index = feature_index
         self.output_index = output_index
         self.patch_vec = patch_vec
-        self.call_count = 0
 
-        # Extraction storage
         self.storage = storage
         self.extract_name_before = extract_name_before
         self.extract_name_after = extract_name_after
 
-    #  Helpers
-    def _snapshot(self, tensor):
-        """Return a detached, cloned, CPU-safe snapshot of an activation."""
-        with torch.no_grad():
-            # Fast GPU → CPU copy (async if pinned memory)
-            return tensor.detach().clone().to("cpu", non_blocking=True).to(torch.bfloat16)
+        self.call_count = 0
 
-    def _replace_output(self, output, new_value):
-        """Replace output_index inside tuple outputs."""
-        if isinstance(output, tuple):
+    # ------------------------------------------------------------------
+    # Helper: safe CPU snapshot
+    # ------------------------------------------------------------------
+    def _snapshot(self, tensor: torch.Tensor):
+        """Return a detached, cloned, CPU-safe (bfloat16) copy."""
+        with torch.no_grad():
+            return (
+                tensor.detach()
+                .clone()
+                .to("cpu", non_blocking=True)
+                .to(torch.bfloat16)
+            )
+
+    # ------------------------------------------------------------------
+    # Helper: replace tensor inside tuple outputs
+    # ------------------------------------------------------------------
+    def _replace_output(self, outputs, new_value):
+        """Replace the output at output_index if the module returns a tuple."""
+        if isinstance(outputs, tuple):
             return tuple(
-                new_value if i == self.output_index else o
-                for i, o in enumerate(output)
+                new_value if idx == self.output_index else val
+                for idx, val in enumerate(outputs)
             )
         return new_value
 
-
+    # ------------------------------------------------------------------
     # Forward hook
+    # ------------------------------------------------------------------
     def __call__(self, module, inputs, outputs):
-        """Forward hook entry point."""
+        """
+        Full forward hook callback.
+
+        Steps:
+          1) Select target activation.
+          2) Save BEFORE snapshot (optional).
+          3) Clone → patch → modify tensor.
+          4) Save AFTER snapshot (optional).
+          5) Return patched activation.
+        """
         self.call_count += 1
 
-        # Select the correct activation slice
+        # Resolve correct output element.
         is_tuple = isinstance(outputs, tuple)
         target = outputs[self.output_index] if is_tuple else outputs
 
-        # Extract BEFORE patching
+        # Save BEFORE snapshot
         if self.storage is not None and self.extract_name_before:
             self.storage[self.extract_name_before] = {
-                'tensor': self._snapshot(target),
-                'shape': tuple(target.shape),
-                'device': str(target.device),
-                'call_count': self.call_count,
+                "tensor": self._snapshot(target),
+                "shape": tuple(target.shape),
+                "device": str(target.device),
+                "call_count": self.call_count,
             }
 
-        # Build detached clone for patching
+        # Prepare patching clone
         patched = target.detach().clone()
 
         # Move patch vector to correct device
         if isinstance(self.patch_vec, torch.Tensor):
-            patch_vec = self.patch_vec.to(patched.device, non_blocking=True)
+            vec = self.patch_vec.to(patched.device, non_blocking=True)
         else:
-            patch_vec = self.patch_vec
+            vec = self.patch_vec
 
-        # ------------------------
-        # Apply patch by dimension
-        # ------------------------
+        # Apply patch
         if patched.ndim == 3:
-            self._patch_3d(patched, patch_vec)
+            self._patch_3d(patched, vec)
         elif patched.ndim == 2:
-            self._patch_2d(patched, patch_vec)
+            self._patch_2d(patched, vec)
         else:
-            # Extract after patching if requested (prevents error)
+            # Unsupported shape → still optionally save AFTER snapshot
             if self.storage is not None and self.extract_name_after:
                 self.storage[self.extract_name_after] = {
-                    'tensor': self._snapshot(patched),
-                    'shape': tuple(patched.shape),
-                    'device': str(patched.device),
-                    'call_count': self.call_count,
+                    "tensor": self._snapshot(patched),
+                    "shape": tuple(patched.shape),
+                    "device": str(patched.device),
+                    "call_count": self.call_count,
                 }
-            return outputs  
-        # Extract after patching
+            return outputs
+
+        # Save AFTER snapshot
         if self.storage is not None and self.extract_name_after:
             self.storage[self.extract_name_after] = {
-                'tensor': self._snapshot(patched),
-                'shape': tuple(patched.shape),
-                'device': str(patched.device),
-                'call_count': self.call_count,
+                "tensor": self._snapshot(patched),
+                "shape": tuple(patched.shape),
+                "device": str(patched.device),
+                "call_count": self.call_count,
             }
 
         return self._replace_output(outputs, patched)
 
-    # Patching Operation Functions 
-
+    # ------------------------------------------------------------------
+    # Patching utilities
+    # ------------------------------------------------------------------
     def _patch_3d(self, tensor: torch.Tensor, vec):
-    """Patch 3D tensors of shape (batch, seq, feature)."""
-    
-    _, S, _ = tensor.shape
+        """
+        Patch 3D tensor: shape (b, n, d).
 
-    with torch.no_grad():
-        if isinstance(vec, torch.Tensor):
-            vec = vec.to(tensor.device, non_blocking=True)
-            if vec.numel() == 1:
-                vec = vec.item()
-            else:
-                vec = vec.reshape(-1)
-                if vec.numel() != S:
-                    raise ValueError(
-                        f"Patch vector length {vec.numel()} must equal seq_len {S} or be scalar."
-                    )
-
-        if self.batch_index is not None and self.feature_index is not None:
-            tensor[self.batch_index, :, self.feature_index] = vec
-        elif self.batch_index is not None:
-            tensor[self.batch_index, :, :] = vec
-        elif self.feature_index is not None:
-            tensor[:, :, self.feature_index] = vec
-        else:
-            tensor[:, :, :] = vec
-
-    def _patch_2d(self, tensor: torch.Tensor, vec):
-        """Patch 2D tensors of shape (batch, feature)."""
+        Supports:
+          - scalar patching
+          - 1D seq-length patching
+          - batch-specific patching
+          - feature-specific patching
+        """
+        _, S, _ = tensor.shape
 
         with torch.no_grad():
+            if isinstance(vec, torch.Tensor):
+                vec = vec.to(tensor.device, non_blocking=True)
+
+                if vec.numel() == 1:
+                    vec = vec.item()
+                else:
+                    vec = vec.reshape(-1)
+                    if vec.numel() != S:
+                        raise ValueError(
+                            f"Patch vector length {vec.numel()} must equal seq_len {S} or be scalar."
+                        )
+
+            # Main rules
             if self.batch_index is not None and self.feature_index is not None:
-                tensor[self.batch_index, self.feature_index] = (
-                    vec.item() if isinstance(vec, torch.Tensor) and vec.numel() == 1 else vec
-                )
+                tensor[self.batch_index, :, self.feature_index] = vec
+            elif self.batch_index is not None:
+                tensor[self.batch_index, :, :] = vec
+            elif self.feature_index is not None:
+                tensor[:, :, self.feature_index] = vec
+            else:
+                tensor[:, :, :] = vec
+
+    def _patch_2d(self, tensor: torch.Tensor, vec):
+        """
+        Patch 2D tensor: shape (b, d).
+
+        Supports:
+          - global patching
+          - per-feature patching
+          - per-batch patching
+        """
+        with torch.no_grad():
+            if self.batch_index is not None and self.feature_index is not None:
+                if isinstance(vec, torch.Tensor) and vec.numel() == 1:
+                    tensor[self.batch_index, self.feature_index] = vec.item()
+                else:
+                    tensor[self.batch_index, self.feature_index] = vec
             elif self.batch_index is not None:
                 tensor[self.batch_index, :] = vec
             elif self.feature_index is not None:
                 tensor[:, self.feature_index] = vec
             else:
                 tensor[:, :] = vec
+
 
 # =======================================
 # ORIGINAL DiT MODULES
