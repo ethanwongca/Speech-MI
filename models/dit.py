@@ -1,15 +1,21 @@
-# ==============================================================================
-# f5_tts/model/backbones/dit.py (MEMORY-FIXED VERSION)
-# ==============================================================================
+"""
+DiT Model with Hooks
+
+ein notation:
+b - batch
+n - sequence
+nt - text sequence
+nw - raw wave length
+d - dimension
+"""
 from __future__ import annotations
 
-print("\n\n<<<<<<<<<< LOADING MEMORY-FIXED DiT BACKBONE >>>>>>>>>>\n\n")
+print("\n\n<<<<<<<<<< Loading DiT Model with Hooks >>>>>>>>>>\n\n")
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 from x_transformers.x_transformers import RotaryEmbedding
-import gc
 
 from f5_tts.model.modules import (
     AdaLayerNorm_Final,
@@ -21,9 +27,7 @@ from f5_tts.model.modules import (
     precompute_freqs_cis,
 )
 
-# =======================================
-# HOOK CLASSES (MEMORY-SAFE)
-# =======================================
+
 class FeatureExtractionHook:
     """Captures module output with proper memory management."""
     
@@ -34,15 +38,13 @@ class FeatureExtractionHook:
         self.call_count = 0
     
     def __call__(self, module, input, output):
+        """
+        Forward hook entry.
+        Invokes PyTorch's forward hook, and saves the tensor
+        """
         self.call_count += 1
         is_tuple = isinstance(output, tuple)
         target_tensor = output[self.output_index] if is_tuple else output
-        
-        # CRITICAL: Proper tensor handling
-        # 1. Detach from computation graph
-        # 2. Clone to create new memory
-        # 3. Move to CPU to free GPU memory
-        # 4. Convert to bfloat16 for storage efficiency
         with torch.no_grad():
             safe_tensor = target_tensor.detach().clone().cpu().to(torch.bfloat16)
         
@@ -52,15 +54,10 @@ class FeatureExtractionHook:
             'shape': tuple(target_tensor.shape),
             'call_count': self.call_count
         }
-        
-        # Force cleanup of any intermediate tensors
-        del target_tensor
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
 
 class FeaturePatchHook:
-    """Modifies module output with PROPER memory management."""
-    
+    """Modifies and/or extracts activations during the forward pass."""
+
     def __init__(
         self,
         batch_index: int | None = None,
@@ -69,115 +66,136 @@ class FeaturePatchHook:
         patch_vec: torch.Tensor | float = 0.0,
         storage: dict | None = None,
         extract_name_before: str | None = None,
-        extract_name_after: str | None = None
+        extract_name_after: str | None = None,
     ):
         self.batch_index = batch_index
         self.feature_index = feature_index
         self.output_index = output_index
         self.patch_vec = patch_vec
         self.call_count = 0
+
+        # Extraction storage
         self.storage = storage
         self.extract_name_before = extract_name_before
         self.extract_name_after = extract_name_after
-    
-    def __call__(self, module, input, output):
+
+    #  Helpers
+    def _snapshot(self, tensor):
+        """Return a detached, cloned, CPU-safe snapshot of an activation."""
+        with torch.no_grad():
+            # Fast GPU → CPU copy (async if pinned memory)
+            return tensor.detach().clone().to("cpu", non_blocking=True).to(torch.bfloat16)
+
+    def _replace_output(self, output, new_value):
+        """Replace output_index inside tuple outputs."""
+        if isinstance(output, tuple):
+            return tuple(
+                new_value if i == self.output_index else o
+                for i, o in enumerate(output)
+            )
+        return new_value
+
+
+    # Forward hook
+    def __call__(self, module, inputs, outputs):
+        """Forward hook entry point."""
         self.call_count += 1
-        is_tuple = isinstance(output, tuple)
-        target_tensor = output[self.output_index] if is_tuple else output
-        
-        # Extract before if requested (with memory safety)
+
+        # Select the correct activation slice
+        is_tuple = isinstance(outputs, tuple)
+        target = outputs[self.output_index] if is_tuple else outputs
+
+        # Extract BEFORE patching
         if self.storage is not None and self.extract_name_before:
-            with torch.no_grad():
-                safe_tensor = target_tensor.detach().clone().cpu().to(torch.bfloat16)
             self.storage[self.extract_name_before] = {
-                'tensor': safe_tensor,
-                'device': str(target_tensor.device),
-                'shape': tuple(target_tensor.shape),
-                'call_count': self.call_count
+                'tensor': self._snapshot(target),
+                'shape': tuple(target.shape),
+                'device': str(target.device),
+                'call_count': self.call_count,
             }
-            del safe_tensor
-        
-        # Clone for patching (in-place modification)
-        patched_tensor = target_tensor.clone()
-        
-        # Ensure patch_vec is on correct device
+
+        # Build detached clone for patching
+        patched = target.detach().clone()
+
+        # Move patch vector to correct device
         if isinstance(self.patch_vec, torch.Tensor):
-            patch_vec = self.patch_vec.to(patched_tensor.device, non_blocking=True)
+            patch_vec = self.patch_vec.to(patched.device, non_blocking=True)
         else:
             patch_vec = self.patch_vec
-        
-        # Apply patch based on dimensions
-        if patched_tensor.ndim == 3:
-            self._patch_3d(patched_tensor, patch_vec)
-        elif patched_tensor.ndim == 2:
-            self._patch_2d(patched_tensor, patch_vec)
-        else:
-            # Unsupported dimension, return unchanged
-            if self.storage is not None and self.extract_name_after:
-                with torch.no_grad():
-                    safe_tensor = patched_tensor.detach().clone().cpu().to(torch.bfloat16)
-                self.storage[self.extract_name_after] = {
-                    'tensor': safe_tensor,
-                    'device': str(patched_tensor.device),
-                    'shape': tuple(patched_tensor.shape),
-                    'call_count': self.call_count
-                }
-                del safe_tensor
-            return output
-        
-        # Extract after if requested (with memory safety)
-        if self.storage is not None and self.extract_name_after:
-            with torch.no_grad():
-                safe_tensor = patched_tensor.detach().clone().cpu().to(torch.bfloat16)
-            self.storage[self.extract_name_after] = {
-                'tensor': safe_tensor,
-                'device': str(patched_tensor.device),
-                'shape': tuple(patched_tensor.shape),
-                'call_count': self.call_count
-            }
-            del safe_tensor
-        
-        # Return modified output
-        if is_tuple:
-            output_list = list(output)
-            output_list[self.output_index] = patched_tensor
-            return tuple(output_list)
-        else:
-            return patched_tensor
-    
-    def _patch_3d(self, tensor: torch.Tensor, patch_vec):
-        """Patch 3D tensor (batch, seq, feature)."""
-        with torch.no_grad():
-            if self.batch_index is not None and self.feature_index is not None:
-                if isinstance(patch_vec, torch.Tensor) and patch_vec.numel() > 1:
-                    tensor[self.batch_index, :, self.feature_index] = patch_vec.reshape(-1)[:tensor.shape[1]]
-                else:
-                    tensor[self.batch_index, :, self.feature_index] = patch_vec
-            elif self.batch_index is not None:
-                tensor[self.batch_index, :, :] = patch_vec
-            elif self.feature_index is not None:
-                tensor[:, :, self.feature_index] = patch_vec
-            else:
-                tensor[:, :, :] = patch_vec
-    
-    def _patch_2d(self, tensor: torch.Tensor, patch_vec):
-        """Patch 2D tensor (batch, feature)."""
-        with torch.no_grad():
-            if self.batch_index is not None and self.feature_index is not None:
-                if isinstance(patch_vec, torch.Tensor):
-                    tensor[self.batch_index, self.feature_index] = patch_vec.item() if patch_vec.numel() == 1 else patch_vec
-                else:
-                    tensor[self.batch_index, self.feature_index] = patch_vec
-            elif self.batch_index is not None:
-                tensor[self.batch_index, :] = patch_vec
-            elif self.feature_index is not None:
-                tensor[:, self.feature_index] = patch_vec
-            else:
-                tensor[:, :] = patch_vec
 
+        # ------------------------
+        # Apply patch by dimension
+        # ------------------------
+        if patched.ndim == 3:
+            self._patch_3d(patched, patch_vec)
+        elif patched.ndim == 2:
+            self._patch_2d(patched, patch_vec)
+        else:
+            # Extract after patching if requested (prevents error)
+            if self.storage is not None and self.extract_name_after:
+                self.storage[self.extract_name_after] = {
+                    'tensor': self._snapshot(patched),
+                    'shape': tuple(patched.shape),
+                    'device': str(patched.device),
+                    'call_count': self.call_count,
+                }
+            return outputs  
+        # Extract after patching
+        if self.storage is not None and self.extract_name_after:
+            self.storage[self.extract_name_after] = {
+                'tensor': self._snapshot(patched),
+                'shape': tuple(patched.shape),
+                'device': str(patched.device),
+                'call_count': self.call_count,
+            }
+
+        return self._replace_output(outputs, patched)
+
+    # Patching Operation Functions 
+
+    def _patch_3d(self, tensor: torch.Tensor, vec):
+    """Patch 3D tensors of shape (batch, seq, feature)."""
+    
+    _, S, _ = tensor.shape
+
+    with torch.no_grad():
+        if isinstance(vec, torch.Tensor):
+            vec = vec.to(tensor.device, non_blocking=True)
+            if vec.numel() == 1:
+                vec = vec.item()
+            else:
+                vec = vec.reshape(-1)
+                if vec.numel() != S:
+                    raise ValueError(
+                        f"Patch vector length {vec.numel()} must equal seq_len {S} or be scalar."
+                    )
+
+        if self.batch_index is not None and self.feature_index is not None:
+            tensor[self.batch_index, :, self.feature_index] = vec
+        elif self.batch_index is not None:
+            tensor[self.batch_index, :, :] = vec
+        elif self.feature_index is not None:
+            tensor[:, :, self.feature_index] = vec
+        else:
+            tensor[:, :, :] = vec
+
+    def _patch_2d(self, tensor: torch.Tensor, vec):
+        """Patch 2D tensors of shape (batch, feature)."""
+
+        with torch.no_grad():
+            if self.batch_index is not None and self.feature_index is not None:
+                tensor[self.batch_index, self.feature_index] = (
+                    vec.item() if isinstance(vec, torch.Tensor) and vec.numel() == 1 else vec
+                )
+            elif self.batch_index is not None:
+                tensor[self.batch_index, :] = vec
+            elif self.feature_index is not None:
+                tensor[:, self.feature_index] = vec
+            else:
+                tensor[:, :] = vec
 
 # =======================================
-# ORIGINAL DiT MODULES (Unchanged)
+# ORIGINAL DiT MODULES
 # =======================================
 class TextEmbedding(nn.Module):
     def __init__(self, text_num_embeds, text_dim, mask_padding=True, average_upsampling=False, conv_layers=0, conv_mult=2):
@@ -329,32 +347,32 @@ class DiT(nn.Module):
     
     def _get_submodule(self, path: str) -> nn.Module:
         """Navigate to submodule by path."""
-        module = self
-        for part in path.split('.'):
-            if part.isdigit():
-                module = module[int(part)]
-            else:
-                module = getattr(module, part)
-        return module
+        try:
+            return self.get_submodule(path)
+        except Exception as e:
+            raise ValueError(f"Invalid submodule path '{path}': {e}")
+
     
     def add_extraction_hook(self, submodule_path: str, hook_name: str, output_index: int = 0):
-        """Add hook to extract activations."""
-        # Remove existing hook if present
-        if hook_name in self.hook_handles:
-            self.hook_handles[hook_name].remove()
-            del self.hook_handles[hook_name]
-            if hook_name in self.hook_objects:
-                del self.hook_objects[hook_name]
-        
-        try:
-            submodule = self._get_submodule(submodule_path)
-            hook_obj = FeatureExtractionHook(self.extracted_activations, hook_name, output_index)
-            handle = submodule.register_forward_hook(hook_obj)
-            self.hook_handles[hook_name] = handle
-            self.hook_objects[hook_name] = hook_obj
-        except Exception as e:
-            print(f"ERROR adding extraction hook '{hook_name}' to '{submodule_path}': {e}")
-    
+    """Add hook to extract activations."""
+    # Remove existing hook if present
+    if hook_name in self.hook_handles:
+        self.hook_handles[hook_name].remove()
+        del self.hook_handles[hook_name]
+        if hook_name in self.hook_objects:
+            del self.hook_objects[hook_name]
+
+    try:
+        submodule = self._get_submodule(submodule_path)
+        hook_obj = FeatureExtractionHook(self.extracted_activations, hook_name, output_index)
+
+        handle = submodule.register_forward_hook(hook_obj, with_kwargs=True)
+        self.hook_handles[hook_name] = handle
+        self.hook_objects[hook_name] = hook_obj
+    except Exception as e:
+        print(f"ERROR adding extraction hook '{hook_name}' to '{submodule_path}': {e}")
+
+
     def add_patch_hook(self, submodule_path: str, hook_name: str, **patch_kwargs):
         """Add hook to patch activations."""
         # Remove existing hook if present
@@ -363,57 +381,54 @@ class DiT(nn.Module):
             del self.hook_handles[hook_name]
             if hook_name in self.hook_objects:
                 del self.hook_objects[hook_name]
-        
+
         try:
             submodule = self._get_submodule(submodule_path)
+
+            # Inject shared storage dictionary
             patch_kwargs['storage'] = self.extracted_activations
             hook_obj = FeaturePatchHook(**patch_kwargs)
-            handle = submodule.register_forward_hook(hook_obj)
+            handle = submodule.register_forward_hook(hook_obj, with_kwargs=True)
+
             self.hook_handles[hook_name] = handle
             self.hook_objects[hook_name] = hook_obj
         except Exception as e:
             print(f"ERROR adding patch hook '{hook_name}' to '{submodule_path}': {e}")
-    
+
+
     def remove_hooks(self):
         """Remove all hooks and cleanup."""
-        for handle in self.hook_handles.values():
+        for handle in list(self.hook_handles.values()):
             handle.remove()
         self.hook_handles.clear()
         self.hook_objects.clear()
-        # Force garbage collection
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-    
+
+
     def clear_activations(self):
         """Clear captured activations to free memory."""
-        # Explicitly delete tensors
-        for key in list(self.extracted_activations.keys()):
-            if 'tensor' in self.extracted_activations[key]:
-                del self.extracted_activations[key]['tensor']
+        for key, entry in list(self.extracted_activations.items()):
+            if isinstance(entry, dict) and 'tensor' in entry:
+                del entry['tensor']
             del self.extracted_activations[key]
         self.extracted_activations.clear()
-        # Force garbage collection
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-    
+
+
     def print_available_submodules(self, max_depth=3):
         """Print all hookable submodules."""
         print("\n" + "="*70)
         print("AVAILABLE SUBMODULES FOR HOOKING")
         print("="*70)
-        
-        def recurse_print(module, prefix="", depth=0):
-            if depth > max_depth:
-                return
-            for name, submodule in module.named_children():
-                full_path = f"{prefix}.{name}" if prefix else name
-                print(f"{'  ' * depth}├─ {name:30s} ({submodule.__class__.__name__})")
-                recurse_print(submodule, full_path, depth + 1)
-        
-        recurse_print(self)
-        print("="*70 + "\n")
+
+    def recurse_print(module, prefix="", depth=0):
+        if depth > max_depth:
+            return
+        for name, submodule in module.named_children():
+            full_path = f"{prefix}.{name}" if prefix else name
+            print(f"{'  ' * depth}├─ {name:30s} ({submodule.__class__.__name__})")
+            recurse_print(submodule, full_path, depth + 1)
+
+    recurse_print(self)
+    print("="*70 + "\n")
     
     def ckpt_wrapper(self, module):
         def ckpt_forward(*inputs):
