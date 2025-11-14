@@ -1,0 +1,170 @@
+DiT Ablation Study Results
+Timestamp: 20251107_122718
+Generated Text: This is a test of the enhanced ablation system with attention head patching.
+
+Experiments: 31/31 successful
+
+
+============================================================
+Experiment: 00_capture_block0
+Status: SUCCESS
+
+Activation Statistics:
+  00_capture_block0:
+    Shape: [2, 754, 1024]
+    Mean: 0.073242
+    Std: 6.968750
+    Min: -133.000000
+    Max: 320.000000
+
+============================================================
+Experiment: 01_baseline
+Status: SUCCESS
+
+============================================================
+Experiment: 02_zero_block0
+Status: SUCCESS
+
+============================================================
+Experiment: 03_zero_block5
+Status: SUCCESS
+
+============================================================
+Experiment: 04_zero_block11
+Status: SUCCESS
+
+============================================================
+Experiment: 05_zero_block21
+Status: SUCCESS
+
+============================================================
+Experiment: 06_zero_input_embed
+Status: SUCCESS
+
+============================================================
+Experiment: 07_zero_time_embed
+Status: SUCCESS
+
+============================================================
+Experiment: 08_zero_text_embed
+Status: SUCCESS
+
+============================================================
+Experiment: 09_zero_attn_q_block5
+Status: SUCCESS
+
+============================================================
+Experiment: 10_zero_attn_k_block5
+Status: SUCCESS
+
+============================================================
+Experiment: 11_zero_attn_v_block5
+Status: SUCCESS
+
+============================================================
+Experiment: 12_zero_head0_block5
+Status: SUCCESS
+
+============================================================
+Experiment: 13_zero_head3_block5
+Status: SUCCESS
+
+============================================================
+Experiment: 14_zero_feature_dim0
+Status: SUCCESS
+
+============================================================
+Experiment: 15_zero_feature_dims_0to10
+Status: SUCCESS
+
+============================================================
+Experiment: 16_constant_block0
+Status: SUCCESS
+
+============================================================
+Experiment: 17_constant_block5_neg
+Status: SUCCESS
+
+============================================================
+Experiment: 18_zero_block0_step10
+Status: SUCCESS
+
+============================================================
+Experiment: 19_zero_block0_early_steps
+Status: SUCCESS
+
+============================================================
+Experiment: 20_zero_block0_late_steps
+Status: SUCCESS
+
+============================================================
+Experiment: 21_zero_block0_middle_steps
+Status: SUCCESS
+
+============================================================
+Experiment: 22_extract_block0
+Status: SUCCESS
+
+Activation Statistics:
+  22_extract_block0:
+    Shape: [2, 754, 1024]
+    Mean: 0.067383
+    Std: 6.875000
+    Min: -131.000000
+    Max: 320.000000
+
+============================================================
+Experiment: 23_extract_block11
+Status: SUCCESS
+
+Activation Statistics:
+  23_extract_block11:
+    Shape: [2, 754, 1024]
+    Mean: -0.283203
+    Std: 21.875000
+    Min: -11072.000000
+    Max: 1872.000000
+
+============================================================
+Experiment: 24_extract_block21
+Status: SUCCESS
+
+Activation Statistics:
+  24_extract_block21:
+    Shape: [2, 754, 1024]
+    Mean: -0.287109
+    Std: 32.750000
+    Min: -14720.000000
+    Max: 2032.000000
+
+============================================================
+Experiment: 25_extract_attn_q_block5
+Status: SUCCESS
+
+Activation Statistics:
+  25_extract_attn_q_block5:
+    Shape: [2, 754, 1024]
+    Mean: -0.066895
+    Std: 1.679688
+    Min: -18.125000
+    Max: 17.375000
+
+============================================================
+Experiment: 26_reinsert_block0_identity
+Status: SUCCESS
+
+============================================================
+Experiment: 27_reinsert_block0_to_block5
+Status: SUCCESS
+
+============================================================
+Experiment: 28_reinsert_block0_to_block11
+Status: SUCCESS
+
+============================================================
+Experiment: 29_reinsert_block0_late_only
+Status: SUCCESS
+
+============================================================
+Experiment: 30_reinsert_block0_partial_features
+Status: SUCCESS

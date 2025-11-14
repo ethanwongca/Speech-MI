@@ -1,0 +1,319 @@
+{
+  "timestamp": "20251107_122718",
+  "gen_text": "This is a test of the enhanced ablation system with attention head patching.",
+  "experiments": {
+    "00_capture_block0": {
+      "success": true,
+      "error": null,
+      "activation_stats": {
+        "00_capture_block0": {
+          "shape": [
+            2,
+            754,
+            1024
+          ],
+          "mean": 0.0732421875,
+          "std": 6.96875,
+          "min": -133.0,
+          "max": 320.0,
+          "call_count": 32
+        }
+      },
+      "audio_file": "00_capture_block0.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 3.957333333333333
+    },
+    "01_baseline": {
+      "success": true,
+      "error": null,
+      "activation_stats": {},
+      "audio_file": "01_baseline.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 3.957333333333333
+    },
+    "02_zero_block0": {
+      "success": true,
+      "error": null,
+      "activation_stats": {},
+      "audio_file": "02_zero_block0.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 3.957333333333333
+    },
+    "03_zero_block5": {
+      "success": true,
+      "error": null,
+      "activation_stats": {},
+      "audio_file": "03_zero_block5.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 3.957333333333333
+    },
+    "04_zero_block11": {
+      "success": true,
+      "error": null,
+      "activation_stats": {},
+      "audio_file": "04_zero_block11.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 3.957333333333333
+    },
+    "05_zero_block21": {
+      "success": true,
+      "error": null,
+      "activation_stats": {},
+      "audio_file": "05_zero_block21.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 3.957333333333333
+    },
+    "06_zero_input_embed": {
+      "success": true,
+      "error": null,
+      "activation_stats": {},
+      "audio_file": "06_zero_input_embed.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 3.957333333333333
+    },
+    "07_zero_time_embed": {
+      "success": true,
+      "error": null,
+      "activation_stats": {},
+      "audio_file": "07_zero_time_embed.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 3.957333333333333
+    },
+    "08_zero_text_embed": {
+      "success": true,
+      "error": null,
+      "activation_stats": {},
+      "audio_file": "08_zero_text_embed.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 3.957333333333333
+    },
+    "09_zero_attn_q_block5": {
+      "success": true,
+      "error": null,
+      "activation_stats": {},
+      "audio_file": "09_zero_attn_q_block5.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 3.957333333333333
+    },
+    "10_zero_attn_k_block5": {
+      "success": true,
+      "error": null,
+      "activation_stats": {},
+      "audio_file": "10_zero_attn_k_block5.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 3.957333333333333
+    },
+    "11_zero_attn_v_block5": {
+      "success": true,
+      "error": null,
+      "activation_stats": {},
+      "audio_file": "11_zero_attn_v_block5.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 3.957333333333333
+    },
+    "12_zero_head0_block5": {
+      "success": true,
+      "error": null,
+      "activation_stats": {},
+      "audio_file": "12_zero_head0_block5.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 3.957333333333333
+    },
+    "13_zero_head3_block5": {
+      "success": true,
+      "error": null,
+      "activation_stats": {},
+      "audio_file": "13_zero_head3_block5.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 3.957333333333333
+    },
+    "14_zero_feature_dim0": {
+      "success": true,
+      "error": null,
+      "activation_stats": {},
+      "audio_file": "14_zero_feature_dim0.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 3.957333333333333
+    },
+    "15_zero_feature_dims_0to10": {
+      "success": true,
+      "error": null,
+      "activation_stats": {},
+      "audio_file": "15_zero_feature_dims_0to10.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 3.957333333333333
+    },
+    "16_constant_block0": {
+      "success": true,
+      "error": null,
+      "activation_stats": {},
+      "audio_file": "16_constant_block0.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 3.957333333333333
+    },
+    "17_constant_block5_neg": {
+      "success": true,
+      "error": null,
+      "activation_stats": {},
+      "audio_file": "17_constant_block5_neg.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 3.957333333333333
+    },
+    "18_zero_block0_step10": {
+      "success": true,
+      "error": null,
+      "activation_stats": {},
+      "audio_file": "18_zero_block0_step10.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 3.957333333333333
+    },
+    "19_zero_block0_early_steps": {
+      "success": true,
+      "error": null,
+      "activation_stats": {},
+      "audio_file": "19_zero_block0_early_steps.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 3.957333333333333
+    },
+    "20_zero_block0_late_steps": {
+      "success": true,
+      "error": null,
+      "activation_stats": {},
+      "audio_file": "20_zero_block0_late_steps.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 3.957333333333333
+    },
+    "21_zero_block0_middle_steps": {
+      "success": true,
+      "error": null,
+      "activation_stats": {},
+      "audio_file": "21_zero_block0_middle_steps.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 3.957333333333333
+    },
+    "22_extract_block0": {
+      "success": true,
+      "error": null,
+      "activation_stats": {
+        "22_extract_block0": {
+          "shape": [
+            2,
+            754,
+            1024
+          ],
+          "mean": 0.0673828125,
+          "std": 6.875,
+          "min": -131.0,
+          "max": 320.0,
+          "call_count": 32
+        }
+      },
+      "audio_file": "22_extract_block0.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 3.957333333333333
+    },
+    "23_extract_block11": {
+      "success": true,
+      "error": null,
+      "activation_stats": {
+        "23_extract_block11": {
+          "shape": [
+            2,
+            754,
+            1024
+          ],
+          "mean": -0.283203125,
+          "std": 21.875,
+          "min": -11072.0,
+          "max": 1872.0,
+          "call_count": 32
+        }
+      },
+      "audio_file": "23_extract_block11.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 3.957333333333333
+    },
+    "24_extract_block21": {
+      "success": true,
+      "error": null,
+      "activation_stats": {
+        "24_extract_block21": {
+          "shape": [
+            2,
+            754,
+            1024
+          ],
+          "mean": -0.287109375,
+          "std": 32.75,
+          "min": -14720.0,
+          "max": 2032.0,
+          "call_count": 32
+        }
+      },
+      "audio_file": "24_extract_block21.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 3.957333333333333
+    },
+    "25_extract_attn_q_block5": {
+      "success": true,
+      "error": null,
+      "activation_stats": {
+        "25_extract_attn_q_block5": {
+          "shape": [
+            2,
+            754,
+            1024
+          ],
+          "mean": -0.06689453125,
+          "std": 1.6796875,
+          "min": -18.125,
+          "max": 17.375,
+          "call_count": 32
+        }
+      },
+      "audio_file": "25_extract_attn_q_block5.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 3.957333333333333
+    },
+    "26_reinsert_block0_identity": {
+      "success": true,
+      "error": null,
+      "activation_stats": {},
+      "audio_file": "26_reinsert_block0_identity.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 3.957333333333333
+    },
+    "27_reinsert_block0_to_block5": {
+      "success": true,
+      "error": null,
+      "activation_stats": {},
+      "audio_file": "27_reinsert_block0_to_block5.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 3.957333333333333
+    },
+    "28_reinsert_block0_to_block11": {
+      "success": true,
+      "error": null,
+      "activation_stats": {},
+      "audio_file": "28_reinsert_block0_to_block11.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 3.957333333333333
+    },
+    "29_reinsert_block0_late_only": {
+      "success": true,
+      "error": null,
+      "activation_stats": {},
+      "audio_file": "29_reinsert_block0_late_only.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 3.957333333333333
+    },
+    "30_reinsert_block0_partial_features": {
+      "success": true,
+      "error": null,
+      "activation_stats": {},
+      "audio_file": "30_reinsert_block0_partial_features.wav",
+      "sample_rate": 24000,
+      "audio_length_sec": 3.957333333333333
+    }
+  }
+}
