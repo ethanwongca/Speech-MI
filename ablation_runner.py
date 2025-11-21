@@ -666,8 +666,8 @@ def main():
     model_name = "F5TTS_v1_Base"
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    LOCAL_MODEL_PATH = "/home/ewong/links/scratch/checkpoints/F5-TTS/F5TTS_v1_Base/model_1250000.safetensors"
-    LOCAL_VOCODER_PATH = "/home/ewong/links/scratch/checkpoints/vocos-mel-24khz"
+    LOCAL_MODEL_PATH = "/scratch/st-jzhu71-1/ewong25/checkpoints/F5-TTS/F5TTS_v1_Base/model_1250000.safetensors"
+    LOCAL_VOCODER_PATH = "/scratch/st-jzhu71-1/ewong25/checkpoints/vocos-mel-24khz"
 
     if not Path(LOCAL_MODEL_PATH).exists():
         print(f"ERROR: Model not found at {LOCAL_MODEL_PATH}")
