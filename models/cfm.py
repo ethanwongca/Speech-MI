@@ -40,36 +40,18 @@ from f5_tts.model.utils import (
 
 def _get_group_and_key(hook_name: str) -> tuple[str, str]:
     """
-    Map a hook_name to a (group_name, sub_key) pair for organizing saved activations.
-
-    Examples:
-        "transformer_blocks.3.attn" -> ("transformer_blocks.3", "attn")
-        "proj_out"                  -> ("proj_out", "__output__")
+    Map a hook_name to a (group_name, sub_key) pair.
+    
+    UPDATED: Returns flat structure. Each hook_name is its own group.
+    This prevents bundling 'attn', 'ff', and 'block' output into one file,
+    which fixes the issue where probing scripts only loaded the first key.
     """
-    parts = hook_name.split('.')
-    if parts[0] == 'transformer_blocks' and len(parts) > 1 and parts[1].isdigit():
-        group_name = f'transformer_blocks.{parts[1]}'
-        sub_key = '.'.join(parts[2:]) if len(parts) > 2 else '__output__'
-    elif '.' in hook_name:
-        group_name = parts[0]
-        sub_key = '.'.join(parts[1:])
-    else:
-        group_name = hook_name
-        sub_key = '__output__'
-    return group_name, sub_key
+    return hook_name, "__output__"
 
 
 class HookConfig:
     """
     Configuration object for managing hooks and activation capture during ODE sampling.
-
-    This controls:
-      - which layers get hooks (all submodules, specific blocks, or custom list)
-      - whether to capture the final output
-      - which timesteps t / step_index to save
-      - precision, device, and disk-saving behavior
-      - optional per-timestep activation clearing
-      - optional per-timestep activation patching (via patches dict)
     """
 
     def __init__(
@@ -86,20 +68,6 @@ class HookConfig:
         patches: dict[int, list[dict]] | None = None,
         clear_activations_per_step: bool = True,
     ):
-        """
-        Args:
-            capture_all_submodules: If True, attach hooks to every named submodule.
-            capture_all_layers: If True, attach hooks to each transformer block.
-            capture_layers: Explicit mapping {hook_name: module_path} to hook.
-            capture_final_output: If True, hook the final projection layer.
-            time_filter: Function (t, step_index) -> bool to decide which steps to capture.
-            precision: dtype for saved activations on CPU (e.g., torch.bfloat16).
-            device: Logical capture device (mostly informational here).
-            save_per_timestep: If True, write activations to disk per timestep.
-            save_dir: Directory to store per-timestep .pt files and metadata.
-            patches: Mapping {step_index: list[patch_config]} for patch hooks.
-            clear_activations_per_step: If True, clear model.extracted_activations each step.
-        """
         self.capture_all_submodules = capture_all_submodules
         self.capture_all_layers = capture_all_layers
         self.capture_layers = capture_layers or {}
@@ -114,7 +82,6 @@ class HookConfig:
         self.patches = patches or {}
         self.clear_activations_per_step = clear_activations_per_step
 
-        # bookkeeping for saved files and metadata about the capture run
         self._saved_files: list[str] = []
         self._metadata = {
             "precision": str(precision),
@@ -126,41 +93,27 @@ class HookConfig:
         }
 
     def should_capture_time(self, t: float, step_index: int) -> bool:
-        """
-        Decide whether to capture activations at this ODE time / step index.
-        Delegates to the user-provided time_filter.
-        """
         return self.time_filter(t, step_index)
 
     def get_layers_to_hook(self, transformer_module: nn.Module) -> dict[str, str]:
-        """
-        Build a mapping {hook_name: module_path} describing which layers to hook.
-
-        Uses a combination of:
-          - capture_all_submodules   -> hooks every named submodule
-          - capture_all_layers       -> hooks each transformer block (if present)
-          - capture_layers (user)    -> explicit dict override / extension
-          - capture_final_output     -> hooks 'proj_out'
-        """
         hooks_dict: dict[str, str] = {}
 
         if self.capture_all_submodules:
             print(f"[HookConfig] Capturing ALL submodules...")
             for module_path, module in transformer_module.named_modules():
-                if not module_path:  # Skip root module
+                if not module_path:
                     continue
                 hooks_dict[module_path] = module_path
 
         if self.capture_all_layers:
             if hasattr(transformer_module, "transformer_blocks"):
                 for i in range(len(transformer_module.transformer_blocks)):
-                    hooks_dict[f"block_{i}"] = f"transformer_blocks.{i}"
+                    hooks_dict[f"transformer_blocks.{i}"] = f"transformer_blocks.{i}"
 
-        # user-specified layers override / extend
         hooks_dict.update(self.capture_layers)
 
         if self.capture_final_output:
-            hooks_dict["final_output"] = "proj_out"
+            hooks_dict["proj_out"] = "proj_out"
 
         num_hooks = len(hooks_dict)
         if num_hooks > 0:
@@ -174,20 +127,6 @@ class HookConfig:
         step_index: int,
         activations: dict[str, torch.Tensor],
     ) -> list[str]:
-        """
-        Save a snapshot of activations for a single timestep to disk.
-
-        Steps:
-          1. Create step-specific directory.
-          2. Group activations by logical block (using _get_group_and_key).
-          3. For each tensor:
-             - detach from the autograd graph
-             - clone to new storage
-             - move to CPU
-             - cast to configured precision
-          4. Save each group as a .pt file.
-          5. Update metadata and return list of saved file paths.
-        """
         if not self.save_per_timestep:
             return []
 
@@ -227,20 +166,18 @@ class HookConfig:
 
             saved_files.append(str(filepath))
 
-        # record this timestep in metadata
         self._metadata["timesteps"].append(
             {
                 "step_index": step_index,
                 "t": t,
                 "directory": str(timestep_dir),
                 "num_groups": num_groups,
-                "group_names": list(activations.keys()),
+                "group_names": list(activations.keys()), # Using raw hook names as group names now
             }
         )
 
         self._saved_files.extend(saved_files)
 
-        # guard logging on CUDA availability
         if torch.cuda.is_available():
             gpu_gb = torch.cuda.memory_allocated() / 1e9
             gpu_msg = f" | GPU: {gpu_gb:.2f}GB"
@@ -249,16 +186,12 @@ class HookConfig:
 
         print(
             f"Saved step {step_index} (t={t:.6f}): {len(activations)} hooks → "
-            f"{num_groups} groups{gpu_msg}"
+            f"{num_groups} files{gpu_msg}"
         )
 
         return saved_files
 
     def save_metadata(self):
-        """
-        Write capture metadata (timesteps, paths, config) to a JSON file
-        in the save_dir. No-op if save_per_timestep=False.
-        """
         if not self.save_per_timestep:
             return
         metadata_path = self.save_dir / "capture_metadata.json"
@@ -267,40 +200,18 @@ class HookConfig:
         print(f"Saved metadata to {metadata_path}")
 
     def get_saved_files(self) -> list[str]:
-        """Return a flat list of all saved activation file paths."""
         return self._saved_files
 
 
 class HookManager:
-    """
-    Orchestrates attaching, updating, and removing hooks during CFM / ODE sampling.
-
-    Responsibilities:
-      - Attach extraction hooks once before sampling.
-      - Manage per-step patch hooks (add/remove each step).
-      - Trigger activation capture + saving via HookConfig.
-      - Clean up hooks and finalize metadata after sampling.
-    """
-
     def __init__(self, config: HookConfig):
-        """
-        Args:
-            config: HookConfig instance controlling what to hook and when to save.
-        """
         self.config = config
-        self._hooks_attached: bool = False          # whether extraction hooks are attached
-        self._hook_names: list[str] = []            # list of hook names used for extraction
-        self._step_counter: int = 0                 # counts how many timesteps were processed
-        self._active_patch_hooks: list[str] = []    # names of patch hooks active for current step
+        self._hooks_attached: bool = False
+        self._hook_names: list[str] = []
+        self._step_counter: int = 0
+        self._active_patch_hooks: list[str] = []
 
     def setup_hooks(self, transformer_module: nn.Module):
-        """
-        Attach all extraction hooks specified in the HookConfig to the given model.
-
-        Uses the model's own .add_extraction_hook API, which is expected to:
-          - register a forward hook
-          - store activations into transformer_module.extracted_activations
-        """
         transformer_module.clear_activations()
         layers_to_hook = self.config.get_layers_to_hook(transformer_module)
 
@@ -321,7 +232,7 @@ class HookManager:
                         hook_name=hook_name,
                     )
                     self._hook_names.append(hook_name)
-                    print(f"{hook_name:30s} → {layer_path}")
+                    # print(f"{hook_name:30s} → {layer_path}")
                 except Exception as e:
                     print(f"{hook_name:30s} → {layer_path} (ERROR: {e})")
 
@@ -329,15 +240,6 @@ class HookManager:
         self._hooks_attached = True
 
     def manage_per_step_hooks(self, transformer_module: nn.Module, t: float, step_index: int):
-        """
-        Update patch hooks for a single ODE step.
-
-        Steps:
-          1. Remove any patch hooks from the previous step.
-          2. Look up patch configs for `step_index` from HookConfig.patches.
-          3. Attach new patch hooks via model.add_patch_hook for this step.
-        """
-        # Remove patch hooks from previous step
         for hook_name in list(self._active_patch_hooks):
             if hook_name in transformer_module.hook_handles:
                 transformer_module.hook_handles[hook_name].remove()
@@ -346,7 +248,6 @@ class HookManager:
                 del transformer_module.hook_objects[hook_name]
         self._active_patch_hooks.clear()
 
-        # Add new patch hooks for this step
         patches_for_this_step = self.config.patches.get(step_index, [])
 
         if not patches_for_this_step:
@@ -372,16 +273,6 @@ class HookManager:
                 print(f"  [HookManager] ERROR adding patch '{hook_name}': {e}")
 
     def capture_and_save_timestep(self, transformer_module: nn.Module, t: float) -> bool:
-        """
-        Capture activations for the current timestep and optionally save them via HookConfig.
-
-        Behavior:
-          - Uses step_counter as the step_index.
-          - Calls HookConfig.should_capture_time(t, step_index).
-          - If capturing and saving is enabled, pulls tensors out of
-            transformer_module.extracted_activations for all known hook names.
-          - Optionally clears activations from the model after saving (or skipping).
-        """
         if not self._hooks_attached and not self.config.patches:
             return False
 
@@ -408,13 +299,6 @@ class HookManager:
         return should_capture
 
     def cleanup(self, transformer_module: nn.Module):
-        """
-        Remove all hooks from the model and finalize metadata.
-
-        Notes:
-          - Does NOT clear activations from the model; caller can inspect them first.
-          - If save_per_timestep=True, also writes metadata JSON summarizing the run.
-        """
         if self._hooks_attached or self._active_patch_hooks:
             transformer_module.remove_hooks()
             self._active_patch_hooks.clear()
@@ -427,14 +311,6 @@ class HookManager:
             print(f"  Total steps: {self._step_counter}")
             if self.config.save_per_timestep:
                 print(f"  Files saved: {len(self.config.get_saved_files())}")
-                print(f"  Directory: {self.config.save_dir}")
-            else:
-                num_activations = (
-                    len(transformer_module.extracted_activations)
-                    if hasattr(transformer_module, "extracted_activations")
-                    else 0
-                )
-                print(f"  Activations in memory: {num_activations}")
             print(f"{'='*70}\n")
 
             self._hooks_attached = False
@@ -554,10 +430,8 @@ class CFM(nn.Module):
             
             if hook_manager:
                 current_step_index = hook_manager._step_counter
-                # Apply timestep-specific patches
                 hook_manager.manage_per_step_hooks(self.transformer, t_float, current_step_index)
             
-            # Predict flow
             if cfg_strength < 1e-5:
                 pred = self.transformer(
                     x=x, cond=step_cond, text=text, time=t, mask=mask,
@@ -571,7 +445,6 @@ class CFM(nn.Module):
                 pred, null_pred = torch.chunk(pred_cfg, 2, dim=0)
                 pred = pred + (pred - null_pred) * cfg_strength
             
-            # Capture activations for this timestep
             if hook_manager:
                 hook_manager.capture_and_save_timestep(self.transformer, t_float)
             
@@ -604,7 +477,6 @@ class CFM(nn.Module):
         trajectory = odeint(fn, y0, t, **self.odeint_kwargs)
         self.transformer.clear_cache()
         
-        # Cleanup hooks
         if hook_manager:
             hook_manager.cleanup(self.transformer)
         
