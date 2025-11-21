@@ -53,10 +53,10 @@ def load_f5_model_and_vocoder(device: str = "cuda") -> Tuple[torch.nn.Module, to
 
     model_name = "F5TTS_v1_Base"
     LOCAL_MODEL_PATH = Path(
-        "/home/ewong/links/scratch/checkpoints/F5-TTS/F5TTS_v1_Base/model_1250000.safetensors"
+        "/scratch/st-jzhu71-1/ewong25/checkpoints/F5-TTS/F5TTS_v1_Base/model_1250000.safetensors"
     )
     LOCAL_VOCODER_PATH = Path(
-        "/home/ewong/links/scratch/checkpoints/vocos-mel-24khz"
+        "/scratch/st-jzhu71-1/ewong25/checkpoints/vocos-mel-24khz"
     )
 
     if not LOCAL_MODEL_PATH.exists():
@@ -100,50 +100,38 @@ def load_f5_model_and_vocoder(device: str = "cuda") -> Tuple[torch.nn.Module, to
 
 def select_dit_hook_layers(transformer: torch.nn.Module) -> Dict[str, str]:
     """
-    Select only the high-level DiT components:
+    Select specific DiT components based on embedding_layer_calls.txt:
 
-    - time_embed
-    - text_embed
-    - input_embed
-    - rotary_embed
-    - norm_out
-    - proj_out
-
-    - transformer_blocks.{i}
-    - transformer_blocks.{i}.attn_norm
-    - transformer_blocks.{i}.attn
-    - transformer_blocks.{i}.ff_norm
-    - transformer_blocks.{i}.ff
-
-    NOTHING deeper than one level inside these.
+    - embeddings: time_embed, text_embed, input_embed
+    - blocks & submodules: transformer_blocks.N, .N.attn, .N.ff, etc.
+    - output: norm_out, proj_out
     """
 
     hook_layers = {}
 
     for module_path, _ in transformer.named_modules():
 
-        # 1. Top-level embeddings and projections
+        # 1. Embeddings and Output
         if module_path in {
             "time_embed",
             "text_embed",
             "input_embed",
-            "rotary_embed",
             "norm_out",
             "proj_out",
         }:
             hook_layers[module_path] = module_path
             continue
 
-        # 2. DiT blocks: transformer_blocks.{i}
+        # 2. DiT blocks and components
         if module_path.startswith("transformer_blocks."):
             parts = module_path.split(".")
 
-            # Block-level capture
+            # Capture the block output itself: transformer_blocks.N
             if len(parts) == 2 and parts[1].isdigit():
                 hook_layers[module_path] = module_path
                 continue
 
-            # Capture only these submodules inside a block
+            # Capture specific sub-components: transformer_blocks.N.{attn, ff, etc}
             if (
                 len(parts) == 3
                 and parts[1].isdigit()
@@ -152,12 +140,9 @@ def select_dit_hook_layers(transformer: torch.nn.Module) -> Dict[str, str]:
                 hook_layers[module_path] = module_path
                 continue
 
-            # Otherwise skip deeper modules (e.g. attn.to_q)
-            continue
-
     print(f"[Layer Selection] Selected {len(hook_layers)} capture modules:")
-    for name in hook_layers:
-        print("  -", name)
+    # for name in sorted(hook_layers.keys()):
+    #     print("  -", name)
 
     return hook_layers
 
@@ -167,9 +152,6 @@ def select_dit_hook_layers(transformer: torch.nn.Module) -> Dict[str, str]:
 def sanitize_block_name(block_name: str) -> str:
     """
     Sanitize a module path so it can be safely used inside a WebDataset key.
-
-    Example:
-        "transformer_blocks.0.attn" -> "transformer_blocks_0_attn"
     """
     return block_name.replace("/", "_").replace(".", "_")
 
@@ -183,50 +165,46 @@ def write_step_to_tar(
     split: str,
 ) -> None:
     """
-    For a given speaker and ODE timestep, write a single .tar file
-    containing one sample per hooked block/submodule.
-
-    Each sample in the tar has:
-      - "<key>.pt"  : activations tensor bytes (as saved by HookConfig)
-      - "<key>.txt" : "speaker_id timestep block_path" string
-
-    Args:
-        speaker_id: LibriTTS speaker ID (e.g., "1234").
-        step_index: ODE timestep index (0-based).
-        step_dir: Directory where HookConfig saved grouped tensors for this timestep.
-        group_names: List of group names (usually hook_names) for this timestep.
-        output_dir: Base directory where .tar shards are written.
-        split: "train" or "test".
+    For a given speaker and ODE timestep, write a single .tar file.
+    With the updated CFM.py, each 'group_name' is a distinct hook (flattened).
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
     tar_path = output_dir / f"speaker_{speaker_id}_step_{step_index:04d}.tar"
-    print(f"  Writing shard: {tar_path}")
+    # print(f"  Writing shard: {tar_path}")
 
-    # One tar per (speaker, timestep)
     with webdataset.TarWriter(str(tar_path)) as writer:
         for group_name in group_names:
+            # group_name is now the full hook path (e.g. transformer_blocks.0.attn)
             safe_filename = f"{sanitize_block_name(group_name)}.pt"
             tensor_path = step_dir / safe_filename
 
             if not tensor_path.exists():
-                print(f"    Warning: tensor file {tensor_path} not found, skipping.")
                 continue
 
             tensor_bytes = tensor_path.read_bytes()
 
-            # Construct a unique key for this sample inside the tar
-            # Example: "1234_t0003_b_transformer_blocks_0_attn"
-            key = f"{speaker_id}_t{step_index:04d}_b{sanitize_block_name(group_name)}"
+            # Key example: "1234_t0003_b_transformer_blocks_0_attn"
+            key = f"{speaker_id}_t{step_index:04d}_b_{sanitize_block_name(group_name)}"
 
-            # Text sidecar: "speaker timestep block_path split"
+            # Text sidecar: "speaker timestep layer_path split"
             txt_content = f"{speaker_id} {step_index} {group_name} {split}"
             txt_bytes = txt_content.encode("utf-8")
 
+            # Metadata for easier parsing
+            metadata = {
+                "speaker_id": speaker_id,
+                "step_index": step_index,
+                "layer_group": group_name,
+                "split": split
+            }
+            json_bytes = json.dumps(metadata).encode("utf-8")
+
             sample = {
                 "__key__": key,
-                "pt": tensor_bytes,
+                "pth": tensor_bytes,
                 "txt": txt_bytes,
+                "json": json_bytes
             }
             writer.write(sample)
 
@@ -240,18 +218,6 @@ def pack_speaker_from_temp(
     """
     Read the HookConfig metadata and per-timestep tensor groups for a speaker,
     and pack them into WebDataset shards.
-
-    For each timestep, this writes exactly one .tar:
-      "speaker_{speaker_id}_step_{step:04d}.tar"
-
-    Args:
-        speaker_id: LibriTTS speaker ID.
-        temp_dir_base: Base directory for temporary saved activations, e.g. "./tmp/train".
-        output_dir: Directory for final .tar shards for this split.
-        split: "train" or "test".
-
-    Returns:
-        True if at least one shard was written, False otherwise.
     """
     run_temp_dir = temp_dir_base / speaker_id
     metadata_path = run_temp_dir / "capture_metadata.json"
@@ -277,11 +243,9 @@ def pack_speaker_from_temp(
         group_names = ts_info.get("group_names", [])
 
         if not step_dir.exists():
-            print(f"  Warning: timestep directory {step_dir} missing, skipping.")
             continue
 
         if not group_names:
-            print(f"  Warning: no group_names listed for step {step_index}, skipping.")
             continue
 
         write_step_to_tar(
@@ -294,11 +258,9 @@ def pack_speaker_from_temp(
         )
         shards_written += 1
 
-    # Optional: cleanup temp directory for this speaker
     if run_temp_dir.exists():
         shutil.rmtree(run_temp_dir, ignore_errors=True)
 
-    print(f"  Finished packing: wrote {shards_written} shards.")
     return shards_written > 0
 
 
@@ -316,27 +278,7 @@ def run_speaker_capture(
     split_label: str,
 ) -> bool:
     """
-    Run one ODE inference pass for a speaker and capture activations
-    at selected DiT layers for each ODE timestep.
-
-    The HookConfig/HookManager from f5_tts.model.cfm handle:
-      - attaching forward hooks
-      - capturing activations at each ODE solver step
-      - writing grouped tensors and metadata into temp_dir_base / speaker_id
-
-    Args:
-        model: F5-TTS model (top-level CFM wrapper).
-        vocoder: Vocos/vocoder model.
-        speaker_id: LibriTTS speaker ID.
-        wav_path: Path to reference waveform.
-        text_prompt: Associated normalized text.
-        temp_dir_base: Base directory for temporary capture files.
-        inference_params: Dict of arguments passed through to infer_process.
-        device: "cuda" or "cpu".
-        split_label: "train" or "test" (for logging only).
-
-    Returns:
-        True if capture completed without raising, False otherwise.
+    Run one ODE inference pass for a speaker and capture activations.
     """
     print(f"\n--- CAPTURE ({split_label}) for Speaker {speaker_id} ({wav_path.name}) ---")
 
@@ -348,38 +290,34 @@ def run_speaker_capture(
 
     transformer = model.transformer
 
-    # Preprocess reference audio/text once per speaker
     try:
         ref_audio, ref_text = preprocess_ref_audio_text(str(wav_path), text_prompt)
     except Exception as e:
         print(f"  Preprocessing failed for speaker {speaker_id}: {e}")
         return False
 
-    # Select which DiT modules to hook
     capture_layers = select_dit_hook_layers(transformer)
 
     if not capture_layers:
         print("  No layers selected for capture; aborting.")
         return False
 
-    # Create HookConfig + HookManager (ODE will call HookManager per timestep)
     hook_config = HookConfig(
         capture_all_submodules=False,
         capture_all_layers=False,
         capture_layers=capture_layers,
         capture_final_output=False,
-        time_filter=lambda t, step: True,   # capture at all timesteps
+        time_filter=lambda t, step: True,
         precision=torch.bfloat16,
         device=device,
-        save_per_timestep=True,             # write per-step grouped tensors to disk
+        save_per_timestep=True,
         save_dir=str(run_temp_dir),
         patches=None,
-        clear_activations_per_step=True,    # free activations after each step
+        clear_activations_per_step=True,
     )
 
     hook_manager = HookManager(hook_config)
 
-    # Run inference once, with hooks attached
     try:
         _ = infer_process(
             ref_audio=ref_audio,
@@ -392,11 +330,8 @@ def run_speaker_capture(
         )
     except Exception as e:
         print(f"  Capture failed for speaker {speaker_id}: {e}")
-        import traceback
-        traceback.print_exc()
         return False
     finally:
-        # Ensure hooks are removed even if inference fails
         if hasattr(transformer, "remove_hooks"):
             transformer.remove_hooks()
         if hasattr(transformer, "clear_activations"):
@@ -409,33 +344,12 @@ def run_speaker_capture(
 # Main driver
 
 def main() -> None:
-    """
-    Top-level dataset builder.
-
-    For each speaker in a LibriTTS subset:
-      1. Capture activations (train utterance + test utterance) at selected DiT layers.
-      2. Convert captures into WebDataset shards:
-         - one shard (.tar) per (speaker, timestep) and split.
-
-    The output directory structure is:
-
-        extracted_features_sharded/
-          train_tars/
-            speaker_XXXX_step_0000.tar
-            ...
-          test_tars/
-            speaker_XXXX_step_0000.tar
-            ...
-    """
     print("\n" + "=" * 80)
     print("DiT ACTIVATION EXTRACTION → WEBDATASET")
     print("=" * 80 + "\n")
 
-    # ------------------------------------------------------------------
-    # Paths and configuration
-    # ------------------------------------------------------------------
-    LIBRITTS_ROOT = Path("/home/ewong/links/scratch/LibriTTS")
-    SUBSET_TO_PROCESS = "test-clean"  # e.g., "train-clean-100"
+    LIBRITTS_ROOT = Path("/scratch/st-jzhu71-1/ewong25/LibriTTS")
+    SUBSET_TO_PROCESS = "test-clean"
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
     OUTPUT_DIR = Path("./extracted_features_sharded")
@@ -447,14 +361,12 @@ def main() -> None:
     TEST_TARS_DIR.mkdir(parents=True, exist_ok=True)
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Load model + vocoder
     try:
         model, vocoder = load_f5_model_and_vocoder(device=DEVICE)
     except Exception as e:
         print(f"Fatal error loading model/vocoder: {e}")
         return
 
-    # Inference parameters passed to infer_process
     inference_params = {
         "mel_spec_type": "vocos",
         "target_rms": 0.1,
@@ -467,9 +379,6 @@ def main() -> None:
         "device": DEVICE,
     }
 
-    # ------------------------------------------------------------------
-    # Discover speakers in the chosen LibriTTS subset
-    # ------------------------------------------------------------------
     subset_dir = LIBRITTS_ROOT / SUBSET_TO_PROCESS
     if not subset_dir.exists():
         print(f"ERROR: Subset directory {subset_dir} does not exist.")
@@ -495,24 +404,17 @@ def main() -> None:
 
         wav_files = sorted(list(speaker_dir.rglob("*.wav")))
         if len(wav_files) < 2:
-            print(
-                f"  Skipping speaker {speaker_id}: need at least 2 WAV files "
-                f"(found {len(wav_files)})."
-            )
+            print(f"  Skipping speaker {speaker_id}: need at least 2 WAV files.")
             failed_count += 1
             continue
 
-        # Use first file for "train" and second for "test" for this script
         train_wav = wav_files[0]
         test_wav = wav_files[1]
         train_txt = train_wav.with_suffix(".normalized.txt")
         test_txt = test_wav.with_suffix(".normalized.txt")
 
         if not (train_txt.exists() and test_txt.exists()):
-            print(
-                f"  Skipping speaker {speaker_id}: missing normalized text "
-                f"({train_txt}, {test_txt})."
-            )
+            print(f"  Skipping speaker {speaker_id}: missing normalized text.")
             failed_count += 1
             continue
 
@@ -525,13 +427,6 @@ def main() -> None:
             continue
 
         speaker_ok = True
-
-        # ------------------------------------------------------------------
-        # TRAIN split: capture → pack
-        # ------------------------------------------------------------------
-        print("\n" + "-" * 80)
-        print(f"TRAIN split for speaker {speaker_id}")
-        print("-" * 80)
 
         if run_speaker_capture(
             model=model,
@@ -553,13 +448,6 @@ def main() -> None:
                 speaker_ok = False
         else:
             speaker_ok = False
-
-        # ------------------------------------------------------------------
-        # TEST split: capture → pack
-        # ------------------------------------------------------------------
-        print("\n" + "-" * 80)
-        print(f"TEST split for speaker {speaker_id}")
-        print("-" * 80)
 
         if run_speaker_capture(
             model=model,
@@ -587,21 +475,16 @@ def main() -> None:
         else:
             failed_count += 1
 
-    # Final summary
     print("\n" + "=" * 80)
     print("EXTRACTION COMPLETE")
     print("=" * 80)
     print(f"Output directory: {OUTPUT_DIR}")
-    print(f"  Train shards: {TRAIN_TARS_DIR}")
-    print(f"  Test shards : {TEST_TARS_DIR}")
     print(f"Successfully processed: {successful_count}")
     print(f"Failed: {failed_count}")
 
-    # Optional final cleanup of any remaining temp files
     if TEMP_DIR.exists():
         try:
             shutil.rmtree(TEMP_DIR, ignore_errors=True)
-            print("Temporary directory cleaned up.")
         except Exception as e:
             print(f"Warning: could not fully clean TEMP_DIR: {e}")
 
