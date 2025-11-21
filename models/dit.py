@@ -445,23 +445,23 @@ class DiT(nn.Module):
 
     
     def add_extraction_hook(self, submodule_path: str, hook_name: str, output_index: int = 0):
-    """Add hook to extract activations."""
-    # Remove existing hook if present
-    if hook_name in self.hook_handles:
-        self.hook_handles[hook_name].remove()
-        del self.hook_handles[hook_name]
-        if hook_name in self.hook_objects:
-            del self.hook_objects[hook_name]
-
-    try:
-        submodule = self._get_submodule(submodule_path)
-        hook_obj = FeatureExtractionHook(self.extracted_activations, hook_name, output_index)
-
-        handle = submodule.register_forward_hook(hook_obj, with_kwargs=True)
-        self.hook_handles[hook_name] = handle
-        self.hook_objects[hook_name] = hook_obj
-    except Exception as e:
-        print(f"ERROR adding extraction hook '{hook_name}' to '{submodule_path}': {e}")
+        """Add hook to extract activations."""
+        # Remove existing hook if present
+        if hook_name in self.hook_handles:
+            self.hook_handles[hook_name].remove()
+            del self.hook_handles[hook_name]
+            if hook_name in self.hook_objects:
+                del self.hook_objects[hook_name]
+    
+        try:
+            submodule = self._get_submodule(submodule_path)
+            hook_obj = FeatureExtractionHook(self.extracted_activations, hook_name, output_index)
+    
+            handle = submodule.register_forward_hook(hook_obj, with_kwargs=True)
+            self.hook_handles[hook_name] = handle
+            self.hook_objects[hook_name] = hook_obj
+        except Exception as e:
+            print(f"ERROR adding extraction hook '{hook_name}' to '{submodule_path}': {e}")
 
 
     def add_patch_hook(self, submodule_path: str, hook_name: str, **patch_kwargs):
