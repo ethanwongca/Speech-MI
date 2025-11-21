@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Speaker Probing over DiT Hidden States and Attention Heads
 ==========================================================
@@ -391,7 +390,7 @@ def main():
     TEST_TARS_DIR = BASE_DIR / "test_tars"
     OUTPUT_DIR = BASE_DIR / "probe_results"
 
-    LIBRITTS_ROOT = Path("/scratch/st-jzhu71-1/ewong25/links/scratch/LibriTTS")
+    LIBRITTS_ROOT = Path("/scratch/st-jzhu71-1/ewong25/LibriTTS")
     SUBSET_TO_PROCESS = "test-clean"
 
     MAX_LENGTH_SEC = 5.0
