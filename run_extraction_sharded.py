@@ -53,10 +53,10 @@ def load_f5_model_and_vocoder(device: str = "cuda") -> Tuple[torch.nn.Module, to
 
     model_name = "F5TTS_v1_Base"
     LOCAL_MODEL_PATH = Path(
-        "/scratch/st-jzhu71-1/ewong25/checkpoints/F5-TTS/F5TTS_v1_Base/model_1250000.safetensors"
+        "/home/ewong/links/scratch/checkpoints/F5-TTS/F5TTS_v1_Base/model_1250000.safetensors"
     )
     LOCAL_VOCODER_PATH = Path(
-        "/scratch/st-jzhu71-1/ewong25/checkpoints/vocos-mel-24khz"
+        "/home/ewong/links/scratch/checkpoints/vocos-mel-24khz"
     )
 
     if not LOCAL_MODEL_PATH.exists():
@@ -348,7 +348,7 @@ def main() -> None:
     print("DiT ACTIVATION EXTRACTION → WEBDATASET")
     print("=" * 80 + "\n")
 
-    LIBRITTS_ROOT = Path("/scratch/st-jzhu71-1/ewong25/LibriTTS")
+    LIBRITTS_ROOT = Path("/home/ewong/links/scratch/LibriTTS")
     SUBSET_TO_PROCESS = "test-clean"
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 

@@ -242,8 +242,10 @@ class FeaturePatchHook:
         with torch.no_grad():
             if isinstance(vec, torch.Tensor):
                 vec = vec.to(tensor.device, non_blocking=True)
-
-                if vec.numel() == 1:
+                
+                if vec.numel() == tensor.numel():
+                    pass
+                elif vec.numel() == 1:
                     vec = vec.item()
                 else:
                     vec = vec.reshape(-1)
@@ -457,7 +459,7 @@ class DiT(nn.Module):
             submodule = self._get_submodule(submodule_path)
             hook_obj = FeatureExtractionHook(self.extracted_activations, hook_name, output_index)
     
-            handle = submodule.register_forward_hook(hook_obj, with_kwargs=True)
+            handle = submodule.register_forward_hook(hook_obj)
             self.hook_handles[hook_name] = handle
             self.hook_objects[hook_name] = hook_obj
         except Exception as e:
@@ -479,7 +481,7 @@ class DiT(nn.Module):
             # Inject shared storage dictionary
             patch_kwargs['storage'] = self.extracted_activations
             hook_obj = FeaturePatchHook(**patch_kwargs)
-            handle = submodule.register_forward_hook(hook_obj, with_kwargs=True)
+            handle = submodule.register_forward_hook(hook_obj)
 
             self.hook_handles[hook_name] = handle
             self.hook_objects[hook_name] = hook_obj
@@ -510,16 +512,16 @@ class DiT(nn.Module):
         print("AVAILABLE SUBMODULES FOR HOOKING")
         print("="*70)
 
-    def recurse_print(module, prefix="", depth=0):
-        if depth > max_depth:
-            return
-        for name, submodule in module.named_children():
-            full_path = f"{prefix}.{name}" if prefix else name
-            print(f"{'  ' * depth}├─ {name:30s} ({submodule.__class__.__name__})")
-            recurse_print(submodule, full_path, depth + 1)
+        def recurse_print(module, prefix="", depth=0):
+            if depth > max_depth:
+                return
+            for name, submodule in module.named_children():
+                full_path = f"{prefix}.{name}" if prefix else name
+                print(f"{'  ' * depth}├─ {name:30s} ({submodule.__class__.__name__})")
+                recurse_print(submodule, full_path, depth + 1)
 
-    recurse_print(self)
-    print("="*70 + "\n")
+        recurse_print(self)
+        print("="*70 + "\n")
     
     def ckpt_wrapper(self, module):
         def ckpt_forward(*inputs):

@@ -390,7 +390,7 @@ def main():
     TEST_TARS_DIR = BASE_DIR / "test_tars"
     OUTPUT_DIR = BASE_DIR / "probe_results"
 
-    LIBRITTS_ROOT = Path("/scratch/st-jzhu71-1/ewong25/LibriTTS")
+    LIBRITTS_ROOT = Path("/home/ewong/links/scratch/LibriTTS")
     SUBSET_TO_PROCESS = "test-clean"
 
     MAX_LENGTH_SEC = 5.0
@@ -398,7 +398,7 @@ def main():
 
     MODEL_NAME = "F5TTS_v1_Base"
     LOCAL_MODEL_PATH = Path(
-        "/scratch/st-jzhu71-1/ewong25/checkpoints/F5-TTS/F5TTS_v1_Base/model_1250000.safetensors"
+        "/home/ewong/links/scratch/checkpoints/F5-TTS/F5TTS_v1_Base/model_1250000.safetensors"
     )
 
     subset_dir = LIBRITTS_ROOT / SUBSET_TO_PROCESS
