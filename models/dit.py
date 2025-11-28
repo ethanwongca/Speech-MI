@@ -63,7 +63,7 @@ class FeatureExtractionHook:
         self.output_index = output_index
         self.call_count = 0
 
-    def __call__(self, module, inputs, outputs):
+    def __call__(self, module, args, kwargs, outputs):
         """
         Forward hook callback.
         Automatically executed by PyTorch during module.forward().
@@ -93,14 +93,8 @@ class FeatureExtractionHook:
 
 class FeaturePatchHook:
     """
-    Forward hook that **modifies** (patches) activation tensors
-    and can optionally store "before" and/or "after" snapshots.
-
-    Responsibilities:
-      - Clone the activation tensor.
-      - Apply patching along batch or feature dimensions.
-      - Replace the module's output with patched version.
-      - Optionally save pre- and post-patch activations.
+    Forward hook that modifies (patches) activation tensors
+    and optionally stores "before" and/or "after" snapshots.
     """
 
     def __init__(
@@ -113,16 +107,6 @@ class FeaturePatchHook:
         extract_name_before: str | None = None,
         extract_name_after: str | None = None,
     ):
-        """
-        Args:
-            batch_index: Which batch dimension to patch (None = all).
-            feature_index: Which feature dimension to patch.
-            output_index: Which output to patch if module returns a tuple.
-            patch_vec: Value or tensor to apply as the patch.
-            storage: Optional dict to store before/after snapshots.
-            extract_name_before: Key for recording pre-patch tensor.
-            extract_name_after: Key for recording post-patch tensor.
-        """
         self.batch_index = batch_index
         self.feature_index = feature_index
         self.output_index = output_index
@@ -134,9 +118,6 @@ class FeaturePatchHook:
 
         self.call_count = 0
 
-    # ------------------------------------------------------------------
-    # Helper: safe CPU snapshot
-    # ------------------------------------------------------------------
     def _snapshot(self, tensor: torch.Tensor):
         """Return a detached, cloned, CPU-safe (bfloat16) copy."""
         with torch.no_grad():
@@ -147,9 +128,6 @@ class FeaturePatchHook:
                 .to(torch.bfloat16)
             )
 
-    # ------------------------------------------------------------------
-    # Helper: replace tensor inside tuple outputs
-    # ------------------------------------------------------------------
     def _replace_output(self, outputs, new_value):
         """Replace the output at output_index if the module returns a tuple."""
         if isinstance(outputs, tuple):
@@ -159,83 +137,9 @@ class FeaturePatchHook:
             )
         return new_value
 
-    # ------------------------------------------------------------------
-    # Forward hook
-    # ------------------------------------------------------------------
-    def __call__(self, module, inputs, outputs):
-        """
-        Full forward hook callback.
-
-        Steps:
-          1) Select target activation.
-          2) Save BEFORE snapshot (optional).
-          3) Clone → patch → modify tensor.
-          4) Save AFTER snapshot (optional).
-          5) Return patched activation.
-        """
-        self.call_count += 1
-
-        # Resolve correct output element.
-        is_tuple = isinstance(outputs, tuple)
-        target = outputs[self.output_index] if is_tuple else outputs
-
-        # Save BEFORE snapshot
-        if self.storage is not None and self.extract_name_before:
-            self.storage[self.extract_name_before] = {
-                "tensor": self._snapshot(target),
-                "shape": tuple(target.shape),
-                "device": str(target.device),
-                "call_count": self.call_count,
-            }
-
-        # Prepare patching clone
-        patched = target.detach().clone()
-
-        # Move patch vector to correct device
-        if isinstance(self.patch_vec, torch.Tensor):
-            vec = self.patch_vec.to(patched.device, non_blocking=True)
-        else:
-            vec = self.patch_vec
-
-        # Apply patch
-        if patched.ndim == 3:
-            self._patch_3d(patched, vec)
-        elif patched.ndim == 2:
-            self._patch_2d(patched, vec)
-        else:
-            # Unsupported shape → still optionally save AFTER snapshot
-            if self.storage is not None and self.extract_name_after:
-                self.storage[self.extract_name_after] = {
-                    "tensor": self._snapshot(patched),
-                    "shape": tuple(patched.shape),
-                    "device": str(patched.device),
-                    "call_count": self.call_count,
-                }
-            return outputs
-
-        # Save AFTER snapshot
-        if self.storage is not None and self.extract_name_after:
-            self.storage[self.extract_name_after] = {
-                "tensor": self._snapshot(patched),
-                "shape": tuple(patched.shape),
-                "device": str(patched.device),
-                "call_count": self.call_count,
-            }
-
-        return self._replace_output(outputs, patched)
-
-    # ------------------------------------------------------------------
-    # Patching utilities
-    # ------------------------------------------------------------------
     def _patch_3d(self, tensor: torch.Tensor, vec):
         """
         Patch 3D tensor: shape (b, n, d).
-
-        Supports:
-          - scalar patching
-          - 1D seq-length patching
-          - batch-specific patching
-          - feature-specific patching
         """
         _, S, _ = tensor.shape
 
@@ -243,8 +147,9 @@ class FeaturePatchHook:
             if isinstance(vec, torch.Tensor):
                 vec = vec.to(tensor.device, non_blocking=True)
                 
+                # FIX: Allow full tensor replacement
                 if vec.numel() == tensor.numel():
-                    pass
+                    pass 
                 elif vec.numel() == 1:
                     vec = vec.item()
                 else:
@@ -254,7 +159,6 @@ class FeaturePatchHook:
                             f"Patch vector length {vec.numel()} must equal seq_len {S} or be scalar."
                         )
 
-            # Main rules
             if self.batch_index is not None and self.feature_index is not None:
                 tensor[self.batch_index, :, self.feature_index] = vec
             elif self.batch_index is not None:
@@ -265,14 +169,7 @@ class FeaturePatchHook:
                 tensor[:, :, :] = vec
 
     def _patch_2d(self, tensor: torch.Tensor, vec):
-        """
-        Patch 2D tensor: shape (b, d).
-
-        Supports:
-          - global patching
-          - per-feature patching
-          - per-batch patching
-        """
+        """Patch 2D tensor: shape (b, d)."""
         with torch.no_grad():
             if self.batch_index is not None and self.feature_index is not None:
                 if isinstance(vec, torch.Tensor) and vec.numel() == 1:
@@ -286,6 +183,53 @@ class FeaturePatchHook:
             else:
                 tensor[:, :] = vec
 
+    # FIX: Updated signature to accept args and kwargs
+    def __call__(self, module, args, kwargs, outputs):
+        """
+        Full forward hook callback.
+        """
+        self.call_count += 1
+
+        # Resolve correct output element.
+        is_tuple = isinstance(outputs, tuple)
+        target = outputs[self.output_index] if is_tuple else outputs
+
+        if self.storage is not None and self.extract_name_before:
+            self.storage[self.extract_name_before] = {
+                "tensor": self._snapshot(target),
+                "shape": tuple(target.shape),
+                "device": str(target.device),
+                "call_count": self.call_count,
+            }
+
+        # 2. Prepare patching clone
+        patched = target.detach().clone()
+
+        # Move patch vector to correct device
+        if isinstance(self.patch_vec, torch.Tensor):
+            vec = self.patch_vec.to(patched.device, non_blocking=True)
+        else:
+            vec = self.patch_vec
+
+        # 3. Apply patch to the clone
+        if patched.ndim == 3:
+            self._patch_3d(patched, vec)
+        elif patched.ndim == 2:
+            self._patch_2d(patched, vec)
+        else:
+            # Fallback for unsupported shapes
+            raise Exception("Shape of the vector is wrong")
+
+        # 4. Save AFTER snapshot from 'patched' (Modified)
+        if self.storage is not None and self.extract_name_after:
+            self.storage[self.extract_name_after] = {
+                "tensor": self._snapshot(patched),
+                "shape": tuple(patched.shape),
+                "device": str(patched.device),
+                "call_count": self.call_count,
+            }
+
+        return self._replace_output(outputs, patched)
 
 # =======================================
 # ORIGINAL DiT MODULES
@@ -459,7 +403,7 @@ class DiT(nn.Module):
             submodule = self._get_submodule(submodule_path)
             hook_obj = FeatureExtractionHook(self.extracted_activations, hook_name, output_index)
     
-            handle = submodule.register_forward_hook(hook_obj)
+            handle = submodule.register_forward_hook(hook_obj, with_kwargs=True)
             self.hook_handles[hook_name] = handle
             self.hook_objects[hook_name] = hook_obj
         except Exception as e:
@@ -481,7 +425,7 @@ class DiT(nn.Module):
             # Inject shared storage dictionary
             patch_kwargs['storage'] = self.extracted_activations
             hook_obj = FeaturePatchHook(**patch_kwargs)
-            handle = submodule.register_forward_hook(hook_obj)
+            handle = submodule.register_forward_hook(hook_obj, with_kwargs=True)
 
             self.hook_handles[hook_name] = handle
             self.hook_objects[hook_name] = hook_obj

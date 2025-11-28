@@ -1,16 +1,11 @@
 """
-DiT Activation Extraction - WebDataset Pipeline
+DiT Activation Extraction - WebDataset Pipeline (Per-Speaker Sharding + All Hooks)
 
 This script:
 - Runs F5-TTS with ODE sampling.
-- Hooks a selected set of DiT transformer blocks (and optionally their main
-  submodules) instead of every tiny submodule.
-- Captures activations at each ODE timestep via the existing HookConfig/HookManager.
-- For each speaker and timestep, writes a single .tar WebDataset shard.
-  Each shard contains:
-    - one sample per hooked block/submodule
-    - "<key>.pt"  : activation tensor bytes
-    - "<key>.txt" : "speaker_id timestep block_path" string
+- Hooks ALL DiT transformer blocks and their internal submodules (attn, ff, etc.).
+- Captures activations at each ODE timestep.
+- Writes a SINGLE .tar WebDataset shard per speaker containing all timesteps.
 """
 
 from __future__ import annotations
@@ -33,22 +28,13 @@ from f5_tts.infer.utils_infer import (
     preprocess_ref_audio_text,
     infer_process,
 )
-from f5_tts.model.cfm import HookConfig, HookManager, CFM
-from f5_tts.model.backbones.dit import DiT
+from f5_tts.model.cfm import HookConfig, HookManager
 
 
 # Model / Vocoder loading
 
 def load_f5_model_and_vocoder(device: str = "cuda") -> Tuple[torch.nn.Module, torch.nn.Module]:
-    """
-    Load the F5-TTS model and vocoder using local disk paths.
-
-    Args:
-        device: "cuda" or "cpu".
-
-    Returns:
-        (model, vocoder)
-    """
+    """Load the F5-TTS model and vocoder using local disk paths."""
     print(f"Device: {device}")
 
     model_name = "F5TTS_v1_Base"
@@ -101,7 +87,6 @@ def load_f5_model_and_vocoder(device: str = "cuda") -> Tuple[torch.nn.Module, to
 def select_dit_hook_layers(transformer: torch.nn.Module) -> Dict[str, str]:
     """
     Select specific DiT components based on embedding_layer_calls.txt:
-
     - embeddings: time_embed, text_embed, input_embed
     - blocks & submodules: transformer_blocks.N, .N.attn, .N.ff, etc.
     - output: norm_out, proj_out
@@ -113,11 +98,7 @@ def select_dit_hook_layers(transformer: torch.nn.Module) -> Dict[str, str]:
 
         # 1. Embeddings and Output
         if module_path in {
-            "time_embed",
-            "text_embed",
-            "input_embed",
-            "norm_out",
-            "proj_out",
+            "time_embed", "text_embed", "input_embed", "norm_out", "proj_out",
         }:
             hook_layers[module_path] = module_path
             continue
@@ -131,7 +112,7 @@ def select_dit_hook_layers(transformer: torch.nn.Module) -> Dict[str, str]:
                 hook_layers[module_path] = module_path
                 continue
 
-            # Capture specific sub-components: transformer_blocks.N.{attn, ff, etc}
+            # RESTORED: Capture specific sub-components: transformer_blocks.N.{attn, ff, etc}
             if (
                 len(parts) == 3
                 and parts[1].isdigit()
@@ -150,63 +131,51 @@ def select_dit_hook_layers(transformer: torch.nn.Module) -> Dict[str, str]:
 # WebDataset Writing
 
 def sanitize_block_name(block_name: str) -> str:
-    """
-    Sanitize a module path so it can be safely used inside a WebDataset key.
-    """
+    """Sanitize a module path so it can be safely used inside a WebDataset key."""
     return block_name.replace("/", "_").replace(".", "_")
 
 
-def write_step_to_tar(
+def write_step_to_writer(
+    writer: webdataset.TarWriter,
     speaker_id: str,
     step_index: int,
     step_dir: Path,
     group_names: List[str],
-    output_dir: Path,
     split: str,
 ) -> None:
     """
-    For a given speaker and ODE timestep, write a single .tar file.
-    With the updated CFM.py, each 'group_name' is a distinct hook (flattened).
+    Writes samples for a specific timestep into the provided TarWriter.
     """
-    output_dir.mkdir(parents=True, exist_ok=True)
+    for group_name in group_names:
+        safe_filename = f"{sanitize_block_name(group_name)}.pt"
+        tensor_path = step_dir / safe_filename
 
-    tar_path = output_dir / f"speaker_{speaker_id}_step_{step_index:04d}.tar"
-    # print(f"  Writing shard: {tar_path}")
+        if not tensor_path.exists():
+            continue
 
-    with webdataset.TarWriter(str(tar_path)) as writer:
-        for group_name in group_names:
-            # group_name is now the full hook path (e.g. transformer_blocks.0.attn)
-            safe_filename = f"{sanitize_block_name(group_name)}.pt"
-            tensor_path = step_dir / safe_filename
+        tensor_bytes = tensor_path.read_bytes()
 
-            if not tensor_path.exists():
-                continue
+        # Key example: "1234_t0003_b_transformer_blocks_0_attn"
+        key = f"{speaker_id}_t{step_index:04d}_b_{sanitize_block_name(group_name)}"
 
-            tensor_bytes = tensor_path.read_bytes()
+        # Text sidecar: "speaker timestep layer_path split"
+        txt_content = f"{speaker_id} {step_index} {group_name} {split}"
+        
+        # Metadata
+        metadata = {
+            "speaker_id": speaker_id,
+            "step_index": step_index,
+            "layer_group": group_name,
+            "split": split
+        }
 
-            # Key example: "1234_t0003_b_transformer_blocks_0_attn"
-            key = f"{speaker_id}_t{step_index:04d}_b_{sanitize_block_name(group_name)}"
-
-            # Text sidecar: "speaker timestep layer_path split"
-            txt_content = f"{speaker_id} {step_index} {group_name} {split}"
-            txt_bytes = txt_content.encode("utf-8")
-
-            # Metadata for easier parsing
-            metadata = {
-                "speaker_id": speaker_id,
-                "step_index": step_index,
-                "layer_group": group_name,
-                "split": split
-            }
-            json_bytes = json.dumps(metadata).encode("utf-8")
-
-            sample = {
-                "__key__": key,
-                "pth": tensor_bytes,
-                "txt": txt_bytes,
-                "json": json_bytes
-            }
-            writer.write(sample)
+        sample = {
+            "__key__": key,
+            "pth": tensor_bytes,
+            "txt": txt_content.encode("utf-8"),
+            "json": json.dumps(metadata).encode("utf-8")
+        }
+        writer.write(sample)
 
 
 def pack_speaker_from_temp(
@@ -217,7 +186,7 @@ def pack_speaker_from_temp(
 ) -> bool:
     """
     Read the HookConfig metadata and per-timestep tensor groups for a speaker,
-    and pack them into WebDataset shards.
+    and pack them into A SINGLE WebDataset shard per speaker.
     """
     run_temp_dir = temp_dir_base / speaker_id
     metadata_path = run_temp_dir / "capture_metadata.json"
@@ -234,29 +203,35 @@ def pack_speaker_from_temp(
         print("  No timesteps recorded in metadata.")
         return False
 
-    print(f"  Packing {len(timesteps)} timesteps for speaker {speaker_id} → WebDataset.")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Create one tar file for the entire speaker
+    tar_path = output_dir / f"speaker_{speaker_id}.tar"
+    print(f"  Packing {len(timesteps)} timesteps -> {tar_path}")
 
     shards_written = 0
-    for ts_info in timesteps:
-        step_index = ts_info.get("step_index")
-        step_dir = Path(ts_info.get("directory", ""))
-        group_names = ts_info.get("group_names", [])
+    
+    with webdataset.TarWriter(str(tar_path)) as writer:
+        for ts_info in timesteps:
+            step_index = ts_info.get("step_index")
+            step_dir = Path(ts_info.get("directory", ""))
+            group_names = ts_info.get("group_names", [])
 
-        if not step_dir.exists():
-            continue
+            if not step_dir.exists():
+                continue
 
-        if not group_names:
-            continue
+            if not group_names:
+                continue
 
-        write_step_to_tar(
-            speaker_id=speaker_id,
-            step_index=step_index,
-            step_dir=step_dir,
-            group_names=group_names,
-            output_dir=output_dir,
-            split=split,
-        )
-        shards_written += 1
+            write_step_to_writer(
+                writer=writer,
+                speaker_id=speaker_id,
+                step_index=step_index,
+                step_dir=step_dir,
+                group_names=group_names,
+                split=split,
+            )
+            shards_written += 1
 
     if run_temp_dir.exists():
         shutil.rmtree(run_temp_dir, ignore_errors=True)
@@ -277,9 +252,7 @@ def run_speaker_capture(
     device: str,
     split_label: str,
 ) -> bool:
-    """
-    Run one ODE inference pass for a speaker and capture activations.
-    """
+    """Run one ODE inference pass for a speaker and capture activations."""
     print(f"\n--- CAPTURE ({split_label}) for Speaker {speaker_id} ({wav_path.name}) ---")
 
     run_temp_dir = temp_dir_base / speaker_id
@@ -345,7 +318,7 @@ def run_speaker_capture(
 
 def main() -> None:
     print("\n" + "=" * 80)
-    print("DiT ACTIVATION EXTRACTION → WEBDATASET")
+    print("DiT ACTIVATION EXTRACTION → WEBDATASET (PER SPEAKER)")
     print("=" * 80 + "\n")
 
     LIBRITTS_ROOT = Path("/home/ewong/links/scratch/LibriTTS")
@@ -387,14 +360,14 @@ def main() -> None:
     speaker_dirs = sorted([p for p in subset_dir.iterdir() if p.is_dir()])
     print(f"Found {len(speaker_dirs)} speakers in subset '{SUBSET_TO_PROCESS}'.")
 
-    if not speaker_dirs:
-        print("No speakers found; exiting.")
-        return
-
     successful_count = 0
     failed_count = 0
 
     for idx, speaker_dir in enumerate(speaker_dirs):
+        # Limit for testing. Remove to run all speakers.
+        if idx == 2: 
+            break
+            
         speaker_id = speaker_dir.name
         print(
             f"\n{'=' * 80}\n"

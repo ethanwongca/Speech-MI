@@ -1,11 +1,6 @@
 """
 Speaker Probing over DiT Hidden States and Attention Heads
-==========================================================
-
-Pipeline overview
------------------
-This script operates on WebDataset shards produced by your extraction pipeline.
-It trains linear probes to classify speakers from DiT internal activations.
+(Compatible with Single-Shard-Per-Speaker format)
 """
 
 import io
@@ -15,14 +10,11 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
 import numpy as np
-import pandas as pd
 import torch
 import webdataset as wds
 from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
-import matplotlib.pyplot as plt
-import seaborn as sns
 
 from omegaconf import OmegaConf
 from hydra.utils import get_class
@@ -87,7 +79,7 @@ def infer_attention_head_config(
 
 
 # ---------------------------------------------------------------------------
-# Data loading from WebDataset
+# Data loading from WebDataset (UPDATED for Per-Speaker Shards)
 # ---------------------------------------------------------------------------
 
 def load_tensors_from_webdataset_shards(
@@ -100,6 +92,7 @@ def load_tensors_from_webdataset_shards(
 ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[List[Tuple[int, int]]]]:
     """
     Load hidden states for a specific timestep and layer.
+    Iterates through per-speaker shards and filters for the target_step.
     """
     speaker_map = {name: i for i, name in enumerate(speakers_list)}
     max_frames = int(max_length_sec * frames_per_sec)
@@ -113,7 +106,9 @@ def load_tensors_from_webdataset_shards(
             continue
 
         speaker_label = speaker_map[speaker_id]
-        pattern = f"speaker_{speaker_id}_step_{target_step:04d}_*.tar"
+        
+        # CHANGED: Look for the single speaker shard
+        pattern = f"speaker_{speaker_id}.tar"
         matching_shards = list(shard_dir.glob(pattern))
 
         if not matching_shards:
@@ -127,8 +122,13 @@ def load_tensors_from_webdataset_shards(
 
                 for sample in dataset:
                     metadata = json.loads(sample["json"].decode("utf-8"))
-                    layer_group = metadata.get("layer_group", "")
+                    
+                    # CHANGED: Filter by step inside the loop
+                    step_index = metadata.get("step_index")
+                    if step_index != target_step:
+                        continue
 
+                    layer_group = metadata.get("layer_group", "")
                     if layer_group != target_layer:
                         continue
 
@@ -140,11 +140,9 @@ def load_tensors_from_webdataset_shards(
 
                     if isinstance(data_dict, dict) and "activations" in data_dict:
                         activations = data_dict["activations"]
-                        # With updated CFM, each file has just "__output__"
                         if "__output__" in activations:
                             tensor = activations["__output__"]
                         else:
-                            # Fallback for legacy files or edge cases
                             tensor = list(activations.values())[0]
                     else:
                         tensor = data_dict
@@ -363,9 +361,6 @@ def train_probe_per_layer_timestep(
     # Save results
     if output_dir is not None:
         output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # (Saving logic omitted for brevity, identical to previous script)
-        # You can copy the DataFrame creation and saving logic here if needed.
         
         steering_full_path = output_dir / "steering_vectors_full.pt"
         torch.save(steering_vectors_full, steering_full_path)
