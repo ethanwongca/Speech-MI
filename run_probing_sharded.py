@@ -107,7 +107,8 @@ def load_tensors_from_webdataset_shards(
 
         speaker_label = speaker_map[speaker_id]
         
-        # CHANGED: Look for the single speaker shard
+        # CHANGED: Look for the single speaker shard (train or test)
+        # Note: extraction script puts them in different folders, so filename is same
         pattern = f"speaker_{speaker_id}.tar"
         matching_shards = list(shard_dir.glob(pattern))
 
@@ -123,33 +124,39 @@ def load_tensors_from_webdataset_shards(
                 for sample in dataset:
                     metadata = json.loads(sample["json"].decode("utf-8"))
                     
-                    # CHANGED: Filter by step inside the loop
+                    # 1. Filter by Step (Crucial for performance optimization)
                     step_index = metadata.get("step_index")
                     if step_index != target_step:
                         continue
 
+                    # 2. Filter by Layer
                     layer_group = metadata.get("layer_group", "")
                     if layer_group != target_layer:
                         continue
 
+                    # 3. Load Data
                     tensor_data_bytes = sample["pth"]
                     data_dict = torch.load(
                         io.BytesIO(tensor_data_bytes),
                         map_location="cpu",
                     )
 
+                    # Handle dictionary wrapper if present
                     if isinstance(data_dict, dict) and "activations" in data_dict:
                         activations = data_dict["activations"]
                         if "__output__" in activations:
                             tensor = activations["__output__"]
                         else:
+                            # Fallback
                             tensor = list(activations.values())[0]
                     else:
                         tensor = data_dict
 
+                    # Flatten [Batch, Time, Dim] -> [Time, Dim]
                     if tensor.ndim == 3:
                         tensor = tensor.reshape(-1, tensor.shape[-1])
                     
+                    # Truncate to max length
                     tensor = tensor[:max_frames, :]
                     if tensor.shape[0] == 0:
                         continue
@@ -244,6 +251,7 @@ def train_probe_per_layer_timestep(
                 f"Layer: {layer_name}, Timestep: {timestep}"
             )
 
+            # Load TRAIN data
             X_train, y_train, _ = load_tensors_from_webdataset_shards(
                 shard_dir=train_dir,
                 speakers_list=speakers_list,
@@ -252,6 +260,7 @@ def train_probe_per_layer_timestep(
                 max_length_sec=max_length_sec,
             )
 
+            # Load TEST data
             X_test, y_test, _ = load_tensors_from_webdataset_shards(
                 shard_dir=test_dir,
                 speakers_list=speakers_list,
@@ -305,7 +314,7 @@ def train_probe_per_layer_timestep(
                 print(f"  Error training full-layer probe: {e}")
                 continue
 
-            # Per-head probes
+            # Per-head probes (only if it's an attention layer)
             if is_attention_layer:
                 if feature_dim % num_heads != 0:
                     print(f"  Warning: feature_dim={feature_dim} not divisible by heads={num_heads}")
@@ -314,6 +323,7 @@ def train_probe_per_layer_timestep(
                 inferred_head_dim = feature_dim // num_heads
                 head_dim_used = inferred_head_dim
 
+                # Reshape for heads: [Total_Tokens, Num_Heads, Head_Dim]
                 X_train_heads = X_train.reshape(-1, num_heads, head_dim_used)
                 X_test_heads = X_test.reshape(-1, num_heads, head_dim_used)
 
@@ -362,11 +372,26 @@ def train_probe_per_layer_timestep(
     if output_dir is not None:
         output_dir.mkdir(parents=True, exist_ok=True)
         
+        # Save steering vectors
         steering_full_path = output_dir / "steering_vectors_full.pt"
         torch.save(steering_vectors_full, steering_full_path)
 
         steering_heads_path = output_dir / "steering_vectors_heads.pt"
         torch.save(steering_vectors_heads, steering_heads_path)
+        
+        # Save JSON results
+        results_path = output_dir / "probing_results.json"
+        with open(results_path, "w") as f:
+            # Helper to convert defaultdict to dict for JSON serialization
+            def default_to_regular(d):
+                if isinstance(d, defaultdict):
+                    d = {k: default_to_regular(v) for k, v in d.items()}
+                return d
+            
+            json.dump({
+                "full_layer": default_to_regular(full_results),
+                "per_head": default_to_regular(head_results)
+            }, f, indent=2)
 
     return full_results, head_results, steering_vectors_full, steering_vectors_heads
 
@@ -377,7 +402,7 @@ def train_probe_per_layer_timestep(
 
 def main():
     print("\n" + "=" * 80)
-    print("SPEAKER PROBING: FLAT STRUCTURE")
+    print("SPEAKER PROBING: SINGLE SHARD PER SPEAKER")
     print("=" * 80 + "\n")
 
     BASE_DIR = Path("./extracted_features_sharded")
@@ -389,7 +414,8 @@ def main():
     SUBSET_TO_PROCESS = "test-clean"
 
     MAX_LENGTH_SEC = 5.0
-    TIMESTEPS_TO_PROBE = list(range(0, 33, 4))
+    # Probe a subset of timesteps to save time
+    TIMESTEPS_TO_PROBE = [0, 8, 16, 24, 31]
 
     MODEL_NAME = "F5TTS_v1_Base"
     LOCAL_MODEL_PATH = Path(
@@ -424,20 +450,26 @@ def main():
         return
     
     unique_layers = set()
+    # Just inspect one shard to get layers list
     try:
         dataset = wds.WebDataset(str(train_shards[0]))
+        # We only need to check the first few samples to find distinct layer names
+        count = 0
         for sample in dataset:
             metadata = json.loads(sample["json"].decode("utf-8"))
             if "layer_group" in metadata:
                 unique_layers.add(metadata["layer_group"])
+            count += 1
+            if count > 200: # Scan enough samples to likely hit all layers for at least one step
+                break
     except Exception as e:
-        print(f"Error reading shard: {e}")
+        print(f"Error reading shard for layer discovery: {e}")
         return
 
     layers_to_probe = sorted(unique_layers)
     print(f"Layers found: {len(layers_to_probe)}")
-    for l in layers_to_probe:
-        print(f" - {l}")
+    # Optional: Filter specific layers if needed
+    # layers_to_probe = [l for l in layers_to_probe if "transformer_blocks.0" in l]
 
     train_probe_per_layer_timestep(
         train_dir=TRAIN_TARS_DIR,
