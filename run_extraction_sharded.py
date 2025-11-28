@@ -363,11 +363,7 @@ def main() -> None:
     successful_count = 0
     failed_count = 0
 
-    for idx, speaker_dir in enumerate(speaker_dirs):
-        # Limit for testing. Remove to run all speakers.
-        if idx == 2: 
-            break
-            
+    for idx, speaker_dir in enumerate(speaker_dirs):            
         speaker_id = speaker_dir.name
         print(
             f"\n{'=' * 80}\n"
