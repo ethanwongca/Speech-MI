@@ -1,5 +1,5 @@
 """
-Step 2. DiT Activation Extraction - Text Control (Train/Test)
+Step 2: DiT Activation Extraction - Text Control (Train/Test)
 """
 from __future__ import annotations
 from pathlib import Path
@@ -15,13 +15,13 @@ from importlib.resources import files
 from f5_tts.infer.utils_infer import load_model, load_vocoder, preprocess_ref_audio_text, infer_process
 from f5_tts.model.cfm import HookConfig, HookManager
 
-# --- SCIENTIFIC CONTROL CONFIG ---
+# --- CONFIGURATION ---
 INPUT_DATASET_PATH = "./libritts_reference_speakers"
 OUTPUT_DIR = Path("./extracted_features_fixed_text")
 TRAIN_TEXT = "The rainbow is a division of white light into many beautiful colors."
 TEST_TEXT = "The quick brown fox jumps over the lazy dog."
 
-# Setup Directories
+# Directories
 DIRS = {
     "train": { "tensors": OUTPUT_DIR / "train" / "tensors", "index": OUTPUT_DIR / "train_index.json" },
     "test":  { "tensors": OUTPUT_DIR / "test" / "tensors",  "index": OUTPUT_DIR / "test_index.json" }
@@ -54,7 +54,7 @@ def load_f5_model_and_vocoder(device: str = "cuda") -> Tuple[torch.nn.Module, to
     print("Model loaded\n")
     return model, vocoder
 
-# 2. Layer Selection
+# 2. Layer Selection (AdaLN, Attn, FF)
 def select_dit_hook_layers(transformer: torch.nn.Module) -> Dict[str, str]:
     hook_layers = {}
     for name, _ in transformer.named_modules():
@@ -127,11 +127,15 @@ def run_speaker_capture(
             
         for pt_file in step_folder.glob("*.pt"):
             layer_name = pt_file.stem
+            
+            # Format: tensors/train/speaker_id/step_X/layer.pt
             perm_step_dir = speaker_tensor_dir / f"step_{step_idx}"
             perm_step_dir.mkdir(exist_ok=True)
             safe_filename = f"{layer_name.replace('.', '_')}.pt"
             perm_path = perm_step_dir / safe_filename
+            
             shutil.move(str(pt_file), str(perm_path))
+            
             entries.append({
                 "speaker_id": speaker_id,
                 "split": split,
@@ -143,12 +147,10 @@ def run_speaker_capture(
     shutil.rmtree(run_temp_dir, ignore_errors=True)
     return entries
 
-# 4. Main
+# 4. Main Driver
 def main() -> None:
     print("\n" + "=" * 80)
     print("DiT EXTRACTION (FIXED TEXT CONTROL)")
-    print(f"TRAIN TEXT: {TRAIN_TEXT}")
-    print(f"TEST TEXT:  {TEST_TEXT}")
     print("=" * 80 + "\n")
 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -180,33 +182,32 @@ def main() -> None:
     for idx, sample in enumerate(ds):
         speaker_id = str(sample["speaker_id"])
         print(f"\nProcessing {idx+1}/{len(ds)}: Speaker {speaker_id}")
+
+        # Create Temp WAV
         temp_wav_path = TEMP_DIR / f"{speaker_id}_ref.wav"
         sf.write(str(temp_wav_path), sample["audio"]["array"], sample["audio"]["sampling_rate"])
 
-        # Pass 1: Train
+        # PASS 1: Train
         print(f"  > Generating TRAIN utterance...")
         train_entries = run_speaker_capture(
-            model=model, vocoder=vocoder, speaker_id=speaker_id,
-            wav_path=temp_wav_path,
-            ref_text_prompt=sample["text_normalized"],
-            target_gen_text=TRAIN_TEXT,
-            inference_params=inference_params, device=DEVICE, split="train"
+            model, vocoder, speaker_id, temp_wav_path,
+            sample["text_normalized"], TRAIN_TEXT,
+            inference_params, DEVICE, "train"
         )
         train_index.extend(train_entries)
 
-        # Pass 2: Test
+        # PASS 2: Test
         print(f"  > Generating TEST utterance...")
         test_entries = run_speaker_capture(
-            model=model, vocoder=vocoder, speaker_id=speaker_id,
-            wav_path=temp_wav_path,
-            ref_text_prompt=sample["text_normalized"],
-            target_gen_text=TEST_TEXT,
-            inference_params=inference_params, device=DEVICE, split="test"
+            model, vocoder, speaker_id, temp_wav_path,
+            sample["text_normalized"], TEST_TEXT,
+            inference_params, DEVICE, "test"
         )
         test_index.extend(test_entries)
         
         if temp_wav_path.exists(): temp_wav_path.unlink()
 
+        # Incremental Save
         if (idx + 1) % 10 == 0:
             print("  ...saving partial indexes...")
             with open(DIRS["train"]["index"], "w") as f: json.dump(train_index, f, indent=2)
@@ -214,6 +215,7 @@ def main() -> None:
 
     with open(DIRS["train"]["index"], "w") as f: json.dump(train_index, f, indent=2)
     with open(DIRS["test"]["index"], "w") as f: json.dump(test_index, f, indent=2)
+    
     if TEMP_DIR.exists(): shutil.rmtree(TEMP_DIR)
 
 if __name__ == "__main__":

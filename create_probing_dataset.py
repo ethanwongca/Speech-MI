@@ -14,7 +14,7 @@ OUTPUT_PATH = EXTRACTED_DIR / "probing_metadata.parquet"
 def main():
     print(f"Loading indexes from {EXTRACTED_DIR}...")
     if not TRAIN_INDEX.exists() or not TEST_INDEX.exists():
-        print("Error: Indexes not found.")
+        print("Error: Indexes not found. Run extraction first.")
         return
 
     with open(TRAIN_INDEX, 'r') as f: train_data = json.load(f)
@@ -29,6 +29,8 @@ def main():
     df_test["split_mode"] = "test"
 
     df_full = pd.concat([df_train, df_test], ignore_index=True)
+    
+    # Memory Optimization
     df_full["timestep"] = df_full["timestep"].astype("int32")
     df_full["speaker_id"] = df_full["speaker_id"].astype("category")
     df_full["block_name"] = df_full["block_name"].astype("category")

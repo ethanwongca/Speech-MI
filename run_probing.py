@@ -82,11 +82,6 @@ def run_probe_for_layer(df, layer_name, timestep):
     y_pred = clf.predict(X_test_scaled)
     y_prob = clf.predict_proba(X_test_scaled)[:, 1]
     
-    # Store coefficients (steering vector) if highly accurate
-    vector_save = None
-    if roc_auc_score(y_test, y_prob) > 0.95:
-         vector_save = clf.coef_
-
     return {
         "layer": layer_name,
         "timestep": timestep,
@@ -98,7 +93,6 @@ def main():
     print(f"Loading metadata from {METADATA_PATH}...")
     df = pd.read_parquet(METADATA_PATH)
     
-    # Validate Target Speaker
     global TARGET_SPEAKER
     if TARGET_SPEAKER not in df["speaker_id"].unique():
         TARGET_SPEAKER = df["speaker_id"].unique()[0]
