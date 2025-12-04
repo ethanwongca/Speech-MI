@@ -1,8 +1,9 @@
 """
-Step 1: Create Reference Dataset
+Step 1: Generate the reference dataset
 """
+
 import glob
-from datasets import load_dataset, Audio, Dataset
+from datasets import load_dataset, Audio, Dataset, Features, Value
 
 # --- CONFIGURATION ---
 DATA_PATH = "../libritts/data/**/*.parquet"
@@ -15,45 +16,49 @@ def create_reference_dataset():
         print("Error: No files found.")
         return
 
-    print(f"Found {len(files)} parquet files. Starting Stream...")
+    print(f"Found {len(files)} parquet files. Starting Generator...")
 
-    # Load in Streaming Mode
-    ds_stream = load_dataset("parquet", data_files=files, split="train", streaming=True)
-    ds_stream = ds_stream.cast_column("audio", Audio(sampling_rate=SAMPLING_RATE))
+    # This function yields one sample at a time, preventing RAM explosion.
+    def speaker_generator():
+        # Initialize streaming inside the generator
+        ds_stream = load_dataset("parquet", data_files=files, split="train", streaming=True)
+        ds_stream = ds_stream.cast_column("audio", Audio(sampling_rate=SAMPLING_RATE))
 
-    valid_samples = []
-    seen_speakers = set()
-    
-    print("Iterating to find 1 clean reference per speaker...")
-    
-    for i, sample in enumerate(ds_stream):
-        spk_id = str(sample["speaker_id"])
+        seen_speakers = set()
         
-        if spk_id in seen_speakers:
-            continue
+        for sample in ds_stream:
+            spk_id = str(sample["speaker_id"])
+            
+            if spk_id in seen_speakers:
+                continue
 
-        try:
-            audio_array = sample["audio"]["array"]
-            # Ensure reference is long enough to clone well (>3s is best for F5)
-            if len(audio_array) > 72000:
-                
-                valid_samples.append({
-                    "speaker_id": spk_id,
-                    "text_normalized": sample["text_normalized"], 
-                    "audio": audio_array
-                })
-                
-                seen_speakers.add(spk_id)
-                print(f"Collected: {len(valid_samples)} unique speakers", end="\r")
+            try:
+                audio_array = sample["audio"]["array"]
+                # Ensure reference is long enough (>3s)
+                if len(audio_array) > 72000:
+                    yield {
+                        "speaker_id": spk_id,
+                        "text_normalized": sample["text_normalized"], 
+                        "audio": audio_array
+                    }
+                    seen_speakers.add(spk_id)
+                    print(f"Collected: {len(seen_speakers)} unique speakers", end="\r")
 
-        except Exception as e:
-            continue
+            except Exception:
+                continue
 
-    print(f"\nScanning complete. Found {len(valid_samples)} total unique speakers.")
+    # Define features to ensure 'audio' is saved correctly as Audio type
+    features = Features({
+        "speaker_id": Value("string"),
+        "text_normalized": Value("string"),
+        "audio": Audio(sampling_rate=SAMPLING_RATE)
+    })
 
-    print(f"Saving to {OUTPUT_DIR}...")
-    final_ds = Dataset.from_list(valid_samples)
-    final_ds = final_ds.cast_column("audio", Audio(sampling_rate=SAMPLING_RATE))
+    # Create dataset from generator (Writes to disk incrementally)
+    print("Generating dataset (memory safe)...")
+    final_ds = Dataset.from_generator(speaker_generator, features=features)
+    
+    print("\nSaving final dataset to disk...")
     final_ds.save_to_disk(OUTPUT_DIR)
     print("Success.")
 
