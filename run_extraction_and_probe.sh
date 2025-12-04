@@ -6,25 +6,26 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=12G
 #SBATCH --output=extraction_probe.out
-#SBATCH --error=extraction_prob.error
-#SBATCH --mail-user=<user>
+#SBATCH --error=extraction_probe.error
+#SBATCH --mail-user=<email>
 #SBATCH --mail-type=ALL
 
 module load gcc arrow
 
 source ~/ai_env/bin/activate
 
-cd /home/ewong/links/scratch/Speech-MI
+echo "Creating Reference Dataset"
 
-echo "Running the extraction script"
+python create_reference_dataset.py
 
-python run_extraction_sharded.py
+echo "Creating Extraction Dataset"
 
-echo "Completed extraction script"
+python create_extraction_dataset.py
 
-echo "Running the probing script"
+echo "Creating Probing Dataset"
 
-python run_probing_sharded.py 
+python create_probing_dataset.py 
 
-echo "Process is completed"
+echo "Running Probing"
 
+python run_probing.py
