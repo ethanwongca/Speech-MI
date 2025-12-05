@@ -113,6 +113,8 @@ def run_speaker_capture(
         )
     except Exception as e:
         print(f"  Capture failed for {speaker_id} ({split}): {e}")
+        # Clean up temp dir if failed to avoid disk fill-up
+        shutil.rmtree(run_temp_dir, ignore_errors=True)
         return []
     finally:
         if hasattr(transformer, "remove_hooks"): transformer.remove_hooks()
@@ -120,30 +122,54 @@ def run_speaker_capture(
 
     entries = []
     
+    # Iterate through temporary step folders (e.g., step_0000, step_0001)
     for step_folder in sorted(run_temp_dir.iterdir()):
         if not step_folder.is_dir(): continue
-        try: step_idx = int(step_folder.name)
-        except ValueError: continue
+        
+        # --- FIX 1: Correctly parse folder names with "step_" prefix ---
+        try:
+            if step_folder.name.startswith("step_"):
+                step_idx = int(step_folder.name.split("_")[1])
+            else:
+                step_idx = int(step_folder.name)
+        except ValueError:
+            continue
             
+        # --- FIX 2: Condense all layers for this step into ONE file ---
+        step_tensors = {}
+        
         for pt_file in step_folder.glob("*.pt"):
-            layer_name = pt_file.stem
+            # Load the temp file saved by cfm.py
+            # Structure is: {'t': float, 'activations': {'__output__': tensor}, ...}
+            try:
+                data = torch.load(pt_file, map_location="cpu")
+                # Clean up the key name (e.g., "transformer_blocks_0_attn")
+                layer_name = pt_file.stem
+                
+                # Extract just the tensor to save space/complexity
+                if "activations" in data and "__output__" in data["activations"]:
+                    step_tensors[layer_name] = data["activations"]["__output__"]
+            except Exception as e:
+                print(f"Error loading {pt_file}: {e}")
+                continue
+
+        if step_tensors:
+            # Save ONE combined file for this timestep
+            combined_filename = f"step_{step_idx}.pt"
+            combined_path = speaker_tensor_dir / combined_filename
+            torch.save(step_tensors, combined_path)
             
-            # Format: tensors/train/speaker_id/step_X/layer.pt
-            perm_step_dir = speaker_tensor_dir / f"step_{step_idx}"
-            perm_step_dir.mkdir(exist_ok=True)
-            safe_filename = f"{layer_name.replace('.', '_')}.pt"
-            perm_path = perm_step_dir / safe_filename
-            
-            shutil.move(str(pt_file), str(perm_path))
-            
+            # Add a single entry to the index for this timestep
             entries.append({
                 "speaker_id": speaker_id,
                 "split": split,
                 "gen_text": target_gen_text,
-                "pt_file": str(perm_path.absolute()),
+                "pt_file": str(combined_path.absolute()),
                 "timestep": step_idx,
-                "block_name": layer_name
+                "layers_included": list(step_tensors.keys()) # Optional: track what's inside
             })
+
+    # Clean up the massive amount of temp files
     shutil.rmtree(run_temp_dir, ignore_errors=True)
     return entries
 

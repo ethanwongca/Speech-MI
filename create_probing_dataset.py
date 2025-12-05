@@ -1,5 +1,5 @@
 """
-Step 3: Build the Probing Metadata Table (Pandas Version)
+Step 3: Build the Probing Metadata Table (Pandas Version) - CONDENSED COMPATIBLE
 """
 import json
 import pandas as pd
@@ -25,10 +25,18 @@ def main():
 
     df_train = pd.DataFrame(train_data)
     df_train["split_mode"] = "train"
+    
     df_test = pd.DataFrame(test_data)
     df_test["split_mode"] = "test"
 
     df_full = pd.concat([df_train, df_test], ignore_index=True)
+    
+    # The JSON now has "layers_included" (list) instead of "block_name" (str).
+    # We "explode" this list so we get one row per layer, pointing to the same file.
+    if "layers_included" in df_full.columns:
+        print("Expanding condensed layers...")
+        df_full = df_full.explode("layers_included")
+        df_full = df_full.rename(columns={"layers_included": "block_name"})
     
     # Memory Optimization
     df_full["timestep"] = df_full["timestep"].astype("int32")

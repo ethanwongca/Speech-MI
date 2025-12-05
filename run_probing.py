@@ -1,5 +1,5 @@
 """
-Step 4: Run Logistic Regression Probe (Pandas Version)
+Step 4: Run Logistic Regression Probe (Condensation Compatible)
 """
 import pandas as pd
 import torch
@@ -17,15 +17,30 @@ RESULTS_DIR.mkdir(exist_ok=True)
 TARGET_SPEAKER = "100" 
 NUM_NEGATIVE_SPEAKERS = 50 
 
-def load_vectors(file_paths):
+def load_vectors(file_paths, layer_name):
+    """
+    Loads tensors from condensed files.
+    Each file is a dict: { 'layer_name': tensor, ... }
+    """
     vectors = []
     for p in file_paths:
         try:
-            t = torch.load(p, map_location="cpu")
-            if t.dim() == 3: t = t.squeeze(0)
-            t_mean = t.mean(dim=0)
-            vectors.append(t_mean.numpy())
-        except Exception: continue
+            # Load the dictionary containing all layers for this step
+            data = torch.load(p, map_location="cpu")
+            
+            # Extract only the specific layer we are probing
+            if layer_name in data:
+                t = data[layer_name]
+                
+                # Handle dimensions (Batch, Seq, Dim) -> (Dim,)
+                if t.dim() == 3: t = t.squeeze(0)
+                t_mean = t.mean(dim=0)
+                
+                vectors.append(t_mean.numpy())
+        except Exception as e: 
+            # print(f"Error loading {p}: {e}") # Optional: Uncomment for debugging
+            continue
+            
     if not vectors: return None
     return np.stack(vectors)
 
@@ -49,8 +64,11 @@ def run_probe_for_layer(df, layer_name, timestep):
     neg_train_paths = neg_train_df[neg_train_df["speaker_id"].isin(chosen_neg_speakers)]["pt_file"].tolist()
 
     if not pos_train_paths or not neg_train_paths: return None
-    X_pos_train = load_vectors(pos_train_paths)
-    X_neg_train = load_vectors(neg_train_paths)
+    
+    # --- UPDATE: Pass layer_name to load_vectors ---
+    X_pos_train = load_vectors(pos_train_paths, layer_name)
+    X_neg_train = load_vectors(neg_train_paths, layer_name)
+    
     if X_pos_train is None or X_neg_train is None: return None
     
     X_train = np.concatenate([X_pos_train, X_neg_train])
@@ -62,8 +80,11 @@ def run_probe_for_layer(df, layer_name, timestep):
     neg_test_paths = test_subset[test_subset["speaker_id"].isin(chosen_neg_speakers)]["pt_file"].tolist()
 
     if not pos_test_paths or not neg_test_paths: return None
-    X_pos_test = load_vectors(pos_test_paths)
-    X_neg_test = load_vectors(neg_test_paths)
+    
+    # --- UPDATE: Pass layer_name to load_vectors ---
+    X_pos_test = load_vectors(pos_test_paths, layer_name)
+    X_neg_test = load_vectors(neg_test_paths, layer_name)
+    
     if X_pos_test is None or X_neg_test is None: return None
 
     X_test = np.concatenate([X_pos_test, X_neg_test])
@@ -91,12 +112,17 @@ def run_probe_for_layer(df, layer_name, timestep):
 
 def main():
     print(f"Loading metadata from {METADATA_PATH}...")
+    if not Path(METADATA_PATH).exists():
+        print(f"Error: {METADATA_PATH} not found. Did you run create_probing_dataset.py?")
+        return
+
     df = pd.read_parquet(METADATA_PATH)
     
     global TARGET_SPEAKER
     if TARGET_SPEAKER not in df["speaker_id"].unique():
+        old_target = TARGET_SPEAKER
         TARGET_SPEAKER = df["speaker_id"].unique()[0]
-        print(f"Target '100' not found. Switching to {TARGET_SPEAKER}")
+        print(f"Target '{old_target}' not found. Switching to {TARGET_SPEAKER}")
 
     unique_layers = df["block_name"].unique().tolist()
     unique_timesteps = sorted(df["timestep"].unique().tolist())
@@ -104,6 +130,7 @@ def main():
     print(f"Target: {TARGET_SPEAKER} | Layers: {len(unique_layers)} | Steps: {len(unique_timesteps)}")
     
     results = []
+    # Loop over layers
     for layer in tqdm(unique_layers, desc="Layers"):
         for t in unique_timesteps:
             res = run_probe_for_layer(df, layer, t)
