@@ -1,5 +1,5 @@
 """
-Step 4: Run Logistic Regression Probe (Condensation Compatible)
+Step 4: Run Logistic Regression Probe (Train/Test/Eval)
 """
 import pandas as pd
 import torch
@@ -18,131 +18,114 @@ TARGET_SPEAKER = "100"
 NUM_NEGATIVE_SPEAKERS = 50 
 
 def load_vectors(file_paths, layer_name):
-    """
-    Loads tensors from condensed files.
-    Each file is a dict: { 'layer_name': tensor, ... }
-    """
     vectors = []
     for p in file_paths:
         try:
-            # Load the dictionary containing all layers for this step
             data = torch.load(p, map_location="cpu")
-            
-            # Extract only the specific layer we are probing
             if layer_name in data:
                 t = data[layer_name]
-                
-                # Handle dimensions (Batch, Seq, Dim) -> (Dim,)
                 if t.dim() == 3: t = t.squeeze(0)
                 t_mean = t.mean(dim=0)
-                
                 vectors.append(t_mean.numpy())
-        except Exception as e: 
-            # print(f"Error loading {p}: {e}") # Optional: Uncomment for debugging
+        except Exception: 
             continue
-            
     if not vectors: return None
     return np.stack(vectors)
 
 def run_probe_for_layer(df, layer_name, timestep):
-    # 1. Filter Data
     subset = df[(df["block_name"] == layer_name) & (df["timestep"] == timestep)]
 
-    # 2. Train Set
+    # --- 1. TRAIN SET ---
     train_subset = subset[subset["split_mode"] == "train"]
-    pos_train_paths = train_subset[train_subset["speaker_id"] == TARGET_SPEAKER]["pt_file"].tolist()
+    pos_train = train_subset[train_subset["speaker_id"] == TARGET_SPEAKER]["pt_file"].tolist()
     
     neg_train_df = train_subset[train_subset["speaker_id"] != TARGET_SPEAKER]
     all_neg_speakers = neg_train_df["speaker_id"].unique()
     if len(all_neg_speakers) == 0: return None
     
-    chosen_neg_speakers = np.random.choice(
-        all_neg_speakers, 
-        size=min(NUM_NEGATIVE_SPEAKERS, len(all_neg_speakers)), 
-        replace=False
-    )
-    neg_train_paths = neg_train_df[neg_train_df["speaker_id"].isin(chosen_neg_speakers)]["pt_file"].tolist()
+    chosen_neg = np.random.choice(all_neg_speakers, size=min(NUM_NEGATIVE_SPEAKERS, len(all_neg_speakers)), replace=False)
+    neg_train = neg_train_df[neg_train_df["speaker_id"].isin(chosen_neg)]["pt_file"].tolist()
 
-    if not pos_train_paths or not neg_train_paths: return None
+    if not pos_train or not neg_train: return None
     
-    # --- UPDATE: Pass layer_name to load_vectors ---
-    X_pos_train = load_vectors(pos_train_paths, layer_name)
-    X_neg_train = load_vectors(neg_train_paths, layer_name)
-    
+    X_pos_train = load_vectors(pos_train, layer_name)
+    X_neg_train = load_vectors(neg_train, layer_name)
     if X_pos_train is None or X_neg_train is None: return None
     
     X_train = np.concatenate([X_pos_train, X_neg_train])
     y_train = np.concatenate([np.ones(len(X_pos_train)), np.zeros(len(X_neg_train))])
 
-    # 3. Test Set
+    # --- 2. TEST SET (Same Ref, Diff Text) ---
     test_subset = subset[subset["split_mode"] == "test"]
-    pos_test_paths = test_subset[test_subset["speaker_id"] == TARGET_SPEAKER]["pt_file"].tolist()
-    neg_test_paths = test_subset[test_subset["speaker_id"].isin(chosen_neg_speakers)]["pt_file"].tolist()
-
-    if not pos_test_paths or not neg_test_paths: return None
+    pos_test = test_subset[test_subset["speaker_id"] == TARGET_SPEAKER]["pt_file"].tolist()
+    neg_test = test_subset[test_subset["speaker_id"].isin(chosen_neg)]["pt_file"].tolist()
     
-    # --- UPDATE: Pass layer_name to load_vectors ---
-    X_pos_test = load_vectors(pos_test_paths, layer_name)
-    X_neg_test = load_vectors(neg_test_paths, layer_name)
+    X_test, y_test = None, None
+    if pos_test and neg_test:
+        X_pos_test = load_vectors(pos_test, layer_name)
+        X_neg_test = load_vectors(neg_test, layer_name)
+        if X_pos_test is not None and X_neg_test is not None:
+            X_test = np.concatenate([X_pos_test, X_neg_test])
+            y_test = np.concatenate([np.ones(len(X_pos_test)), np.zeros(len(X_neg_test))])
+
+    # --- 3. EVAL SET (Diff Ref, Same/Diff Text) ---
+    eval_subset = subset[subset["split_mode"] == "eval"]
+    pos_eval = eval_subset[eval_subset["speaker_id"] == TARGET_SPEAKER]["pt_file"].tolist()
+    neg_eval = eval_subset[eval_subset["speaker_id"].isin(chosen_neg)]["pt_file"].tolist()
     
-    if X_pos_test is None or X_neg_test is None: return None
+    X_eval, y_eval = None, None
+    if pos_eval and neg_eval:
+        X_pos_eval = load_vectors(pos_eval, layer_name)
+        X_neg_eval = load_vectors(neg_eval, layer_name)
+        if X_pos_eval is not None and X_neg_eval is not None:
+            X_eval = np.concatenate([X_pos_eval, X_neg_eval])
+            y_eval = np.concatenate([np.ones(len(X_pos_eval)), np.zeros(len(X_neg_eval))])
 
-    X_test = np.concatenate([X_pos_test, X_neg_test])
-    y_test = np.concatenate([np.ones(len(X_pos_test)), np.zeros(len(X_neg_test))])
-
-    # 4. Train
+    # --- TRAIN & EVALUATE ---
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
-    try: X_test_scaled = scaler.transform(X_test)
-    except ValueError: return None
-
+    
     clf = LogisticRegression(class_weight='balanced', max_iter=1000, solver='liblinear')
     clf.fit(X_train_scaled, y_train)
 
-    # 5. Evaluate
-    y_pred = clf.predict(X_test_scaled)
-    y_prob = clf.predict_proba(X_test_scaled)[:, 1]
-    
-    return {
+    result = {
         "layer": layer_name,
         "timestep": timestep,
-        "test_acc": accuracy_score(y_test, y_pred),
-        "test_auc": roc_auc_score(y_test, y_prob)
+        "test_acc": None, "test_auc": None,
+        "eval_acc": None, "eval_auc": None
     }
 
-def main():
-    print(f"Loading metadata from {METADATA_PATH}...")
-    if not Path(METADATA_PATH).exists():
-        print(f"Error: {METADATA_PATH} not found. Did you run create_probing_dataset.py?")
-        return
+    if X_test is not None:
+        X_test_scaled = scaler.transform(X_test)
+        result["test_acc"] = accuracy_score(y_test, clf.predict(X_test_scaled))
+        result["test_auc"] = roc_auc_score(y_test, clf.predict_proba(X_test_scaled)[:, 1])
 
+    if X_eval is not None:
+        X_eval_scaled = scaler.transform(X_eval)
+        result["eval_acc"] = accuracy_score(y_eval, clf.predict(X_eval_scaled))
+        result["eval_auc"] = roc_auc_score(y_eval, clf.predict_proba(X_eval_scaled)[:, 1])
+    
+    return result
+
+def main():
+    if not Path(METADATA_PATH).exists(): return
     df = pd.read_parquet(METADATA_PATH)
     
-    global TARGET_SPEAKER
-    if TARGET_SPEAKER not in df["speaker_id"].unique():
-        old_target = TARGET_SPEAKER
-        TARGET_SPEAKER = df["speaker_id"].unique()[0]
-        print(f"Target '{old_target}' not found. Switching to {TARGET_SPEAKER}")
-
     unique_layers = df["block_name"].unique().tolist()
     unique_timesteps = sorted(df["timestep"].unique().tolist())
     
-    print(f"Target: {TARGET_SPEAKER} | Layers: {len(unique_layers)} | Steps: {len(unique_timesteps)}")
-    
     results = []
-    # Loop over layers
     for layer in tqdm(unique_layers, desc="Layers"):
         for t in unique_timesteps:
             res = run_probe_for_layer(df, layer, t)
             if res: results.append(res)
 
     results_df = pd.DataFrame(results)
-    save_path = RESULTS_DIR / f"probe_results_speaker_{TARGET_SPEAKER}.csv"
-    results_df.to_csv(save_path, index=False)
+    results_df.to_csv(RESULTS_DIR / f"probe_results_speaker_{TARGET_SPEAKER}.csv", index=False)
     
-    print("\nTop 5 Layers for Speaker Identity:")
-    if not results_df.empty:
-        print(results_df.sort_values("test_auc", ascending=False).head(5))
+    print("\nTop 5 Layers (Eval AUC):")
+    if not results_df.empty and "eval_auc" in results_df.columns:
+        print(results_df.sort_values("eval_auc", ascending=False).head(5))
 
 if __name__ == "__main__":
     main()

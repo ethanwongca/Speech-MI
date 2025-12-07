@@ -1,5 +1,5 @@
 """
-Step 2: DiT Activation Extraction - Text Control (Train/Test)
+Step 2: DiT Activation Extraction (Train/Test/Eval Split)
 """
 from __future__ import annotations
 from pathlib import Path
@@ -18,17 +18,20 @@ from f5_tts.model.cfm import HookConfig, HookManager
 # --- CONFIGURATION ---
 INPUT_DATASET_PATH = "./libritts_reference_speakers"
 OUTPUT_DIR = Path("./extracted_features_fixed_text")
+
 TRAIN_TEXT = "The rainbow is a division of white light into many beautiful colors."
 TEST_TEXT = "The quick brown fox jumps over the lazy dog."
+EVAL_TEXT = "The quick brown fox jumps over the lazy dog." 
 
 # Directories
 DIRS = {
     "train": { "tensors": OUTPUT_DIR / "train" / "tensors", "index": OUTPUT_DIR / "train_index.json" },
-    "test":  { "tensors": OUTPUT_DIR / "test" / "tensors",  "index": OUTPUT_DIR / "test_index.json" }
+    "test":  { "tensors": OUTPUT_DIR / "test" / "tensors",  "index": OUTPUT_DIR / "test_index.json" },
+    "eval":  { "tensors": OUTPUT_DIR / "eval" / "tensors",  "index": OUTPUT_DIR / "eval_index.json" }
 }
 TEMP_DIR = OUTPUT_DIR / "tmp"
 
-for split in ["train", "test"]:
+for split in DIRS.keys():
     DIRS[split]["tensors"].mkdir(parents=True, exist_ok=True)
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -54,7 +57,7 @@ def load_f5_model_and_vocoder(device: str = "cuda") -> Tuple[torch.nn.Module, to
     print("Model loaded\n")
     return model, vocoder
 
-# 2. Layer Selection (AdaLN, Attn, FF)
+# 2. Layer Selection
 def select_dit_hook_layers(transformer: torch.nn.Module) -> Dict[str, str]:
     hook_layers = {}
     for name, _ in transformer.named_modules():
@@ -121,11 +124,8 @@ def run_speaker_capture(
 
     entries = []
     
-    # Iterate through temporary step folders
     for step_folder in sorted(run_temp_dir.iterdir()):
         if not step_folder.is_dir(): continue
-        
-        # --- Parse "step_0000" correctly ---
         try:
             if step_folder.name.startswith("step_"):
                 step_idx = int(step_folder.name.split("_")[1])
@@ -135,22 +135,16 @@ def run_speaker_capture(
             continue
             
         step_tensors = {}
-        
         for pt_file in step_folder.glob("*.pt"):
             try:
-                # Load the temp file (contains 't', 'activations', etc)
                 data = torch.load(pt_file, map_location="cpu")
                 layer_name = pt_file.stem
-                
-                # Extract just the tensor
                 if "activations" in data and "__output__" in data["activations"]:
                     step_tensors[layer_name] = data["activations"]["__output__"]
-            except Exception as e:
-                print(f"Error loading {pt_file}: {e}")
+            except Exception:
                 continue
 
         if step_tensors:
-            # Save ONE condensed file for this timestep
             combined_filename = f"step_{step_idx}.pt"
             combined_path = speaker_tensor_dir / combined_filename
             torch.save(step_tensors, combined_path)
@@ -170,7 +164,7 @@ def run_speaker_capture(
 # 4. Main Driver
 def main() -> None:
     print("\n" + "=" * 80)
-    print("DiT EXTRACTION (FIXED TEXT CONTROL)")
+    print("DiT EXTRACTION (Train/Test/Eval)")
     print("=" * 80 + "\n")
 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -179,7 +173,7 @@ def main() -> None:
         model, vocoder = load_f5_model_and_vocoder(device=DEVICE)
         print(f"Loading reference dataset from {INPUT_DATASET_PATH}...")
         ds = load_from_disk(INPUT_DATASET_PATH)
-        print(f"Dataset loaded. Total speakers: {len(ds)}")
+        print(f"Dataset loaded. Total samples: {len(ds)}")
     except Exception as e:
         print(f"Fatal error: {e}")
         return
@@ -196,45 +190,56 @@ def main() -> None:
         "device": DEVICE,
     }
 
-    train_index = []
-    test_index = []
+    indexes = { "train": [], "test": [], "eval": [] }
     
     for idx, sample in enumerate(ds):
         speaker_id = str(sample["speaker_id"])
-        print(f"\nProcessing {idx+1}/{len(ds)}: Speaker {speaker_id}")
+        sample_idx = sample.get("sample_idx", 0)
+        
+        print(f"\nProcessing {idx+1}/{len(ds)}: Speaker {speaker_id} | Sample {sample_idx}")
 
-        # Create Temp WAV
-        temp_wav_path = TEMP_DIR / f"{speaker_id}_ref.wav"
+        # Write current sample to wav
+        temp_wav_path = TEMP_DIR / f"{speaker_id}_sample{sample_idx}.wav"
         sf.write(str(temp_wav_path), sample["audio"]["array"], sample["audio"]["sampling_rate"])
 
-        # PASS 1: Train
-        print(f"  > Generating TRAIN utterance...")
-        train_entries = run_speaker_capture(
-            model, vocoder, speaker_id, temp_wav_path,
-            sample["text_normalized"], TRAIN_TEXT,
-            inference_params, DEVICE, "train"
-        )
-        train_index.extend(train_entries)
+        if sample_idx == 0:
+            # Used for both Train and Test generations
+            print(f"  > Generating TRAIN...")
+            train_entries = run_speaker_capture(
+                model, vocoder, speaker_id, temp_wav_path,
+                sample["text_normalized"], TRAIN_TEXT,
+                inference_params, DEVICE, "train"
+            )
+            indexes["train"].extend(train_entries)
 
-        # PASS 2: Test
-        print(f"  > Generating TEST utterance...")
-        test_entries = run_speaker_capture(
-            model, vocoder, speaker_id, temp_wav_path,
-            sample["text_normalized"], TEST_TEXT,
-            inference_params, DEVICE, "test"
-        )
-        test_index.extend(test_entries)
+            print(f"  > Generating TEST...")
+            test_entries = run_speaker_capture(
+                model, vocoder, speaker_id, temp_wav_path,
+                sample["text_normalized"], TEST_TEXT,
+                inference_params, DEVICE, "test"
+            )
+            indexes["test"].extend(test_entries)
         
+        elif sample_idx == 1:
+            # Used for Eval generation (checks generalization to new audio)
+            print(f"  > Generating EVAL...")
+            eval_entries = run_speaker_capture(
+                model, vocoder, speaker_id, temp_wav_path,
+                sample["text_normalized"], EVAL_TEXT,
+                inference_params, DEVICE, "eval"
+            )
+            indexes["eval"].extend(eval_entries)
+
         if temp_wav_path.exists(): temp_wav_path.unlink()
 
         # Incremental Save
         if (idx + 1) % 10 == 0:
-            print("  ...saving partial indexes...")
-            with open(DIRS["train"]["index"], "w") as f: json.dump(train_index, f, indent=2)
-            with open(DIRS["test"]["index"], "w") as f: json.dump(test_index, f, indent=2)
+            for split in indexes:
+                with open(DIRS[split]["index"], "w") as f: json.dump(indexes[split], f, indent=2)
 
-    with open(DIRS["train"]["index"], "w") as f: json.dump(train_index, f, indent=2)
-    with open(DIRS["test"]["index"], "w") as f: json.dump(test_index, f, indent=2)
+    # Final Save
+    for split in indexes:
+        with open(DIRS[split]["index"], "w") as f: json.dump(indexes[split], f, indent=2)
     
     if TEMP_DIR.exists(): shutil.rmtree(TEMP_DIR)
 
