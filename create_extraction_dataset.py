@@ -1,5 +1,6 @@
 """
 Step 2: DiT Activation Extraction (Train/Test/Eval Split)
+OPTIMIZED: Uses JSONL streaming and GC to prevent OOM
 """
 from __future__ import annotations
 from pathlib import Path
@@ -23,16 +24,21 @@ TRAIN_TEXT = "The rainbow is a division of white light into many beautiful color
 TEST_TEXT = "The quick brown fox jumps over the lazy dog."
 EVAL_TEXT = "The quick brown fox jumps over the lazy dog." 
 
-# Directories
+# Directories - CHANGED to .jsonl
 DIRS = {
-    "train": { "tensors": OUTPUT_DIR / "train" / "tensors", "index": OUTPUT_DIR / "train_index.json" },
-    "test":  { "tensors": OUTPUT_DIR / "test" / "tensors",  "index": OUTPUT_DIR / "test_index.json" },
-    "eval":  { "tensors": OUTPUT_DIR / "eval" / "tensors",  "index": OUTPUT_DIR / "eval_index.json" }
+    "train": { "tensors": OUTPUT_DIR / "train" / "tensors", "index": OUTPUT_DIR / "train_index.jsonl" },
+    "test":  { "tensors": OUTPUT_DIR / "test" / "tensors",  "index": OUTPUT_DIR / "test_index.jsonl" },
+    "eval":  { "tensors": OUTPUT_DIR / "eval" / "tensors",  "index": OUTPUT_DIR / "eval_index.jsonl" }
 }
 TEMP_DIR = OUTPUT_DIR / "tmp"
 
+# Initialize directories and clear old index files
 for split in DIRS.keys():
     DIRS[split]["tensors"].mkdir(parents=True, exist_ok=True)
+    # Clear/Create empty index files
+    with open(DIRS[split]["index"], "w") as f:
+        pass 
+
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
 # 1. Model Loading
@@ -121,6 +127,8 @@ def run_speaker_capture(
     finally:
         if hasattr(transformer, "remove_hooks"): transformer.remove_hooks()
         if hasattr(transformer, "clear_activations"): transformer.clear_activations()
+        # Explicit cleanup of hook manager
+        del hook_manager
 
     entries = []
     
@@ -137,10 +145,12 @@ def run_speaker_capture(
         step_tensors = {}
         for pt_file in step_folder.glob("*.pt"):
             try:
+                # Ensure map_location is cpu to save GPU mem, though we are limited by System RAM here
                 data = torch.load(pt_file, map_location="cpu")
                 layer_name = pt_file.stem
                 if "activations" in data and "__output__" in data["activations"]:
                     step_tensors[layer_name] = data["activations"]["__output__"]
+                del data # Help GC
             except Exception:
                 continue
 
@@ -157,14 +167,22 @@ def run_speaker_capture(
                 "timestep": step_idx,
                 "layers_included": list(step_tensors.keys())
             })
+            del step_tensors # Help GC
 
     shutil.rmtree(run_temp_dir, ignore_errors=True)
     return entries
 
+def append_to_jsonl(entries: List[Dict], filepath: Path):
+    """Appends entries to a JSONL file immediately."""
+    if not entries: return
+    with open(filepath, "a") as f:
+        for entry in entries:
+            f.write(json.dumps(entry) + "\n")
+
 # 4. Main Driver
 def main() -> None:
     print("\n" + "=" * 80)
-    print("DiT EXTRACTION (Train/Test/Eval)")
+    print("DiT EXTRACTION (Train/Test/Eval) - OPTIMIZED")
     print("=" * 80 + "\n")
 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -190,7 +208,7 @@ def main() -> None:
         "device": DEVICE,
     }
 
-    indexes = { "train": [], "test": [], "eval": [] }
+    # REMOVED: indexes = { "train": [], "test": [], "eval": [] }
     
     for idx, sample in enumerate(ds):
         speaker_id = str(sample["speaker_id"])
@@ -210,7 +228,7 @@ def main() -> None:
                 sample["text_normalized"], TRAIN_TEXT,
                 inference_params, DEVICE, "train"
             )
-            indexes["train"].extend(train_entries)
+            append_to_jsonl(train_entries, DIRS["train"]["index"])
 
             print(f"  > Generating TEST...")
             test_entries = run_speaker_capture(
@@ -218,7 +236,7 @@ def main() -> None:
                 sample["text_normalized"], TEST_TEXT,
                 inference_params, DEVICE, "test"
             )
-            indexes["test"].extend(test_entries)
+            append_to_jsonl(test_entries, DIRS["test"]["index"])
         
         elif sample_idx == 1:
             # Used for Eval generation (checks generalization to new audio)
@@ -228,19 +246,10 @@ def main() -> None:
                 sample["text_normalized"], EVAL_TEXT,
                 inference_params, DEVICE, "eval"
             )
-            indexes["eval"].extend(eval_entries)
+            append_to_jsonl(eval_entries, DIRS["eval"]["index"])
 
         if temp_wav_path.exists(): temp_wav_path.unlink()
 
-        # Incremental Save
-        if (idx + 1) % 10 == 0:
-            for split in indexes:
-                with open(DIRS[split]["index"], "w") as f: json.dump(indexes[split], f, indent=2)
-
-    # Final Save
-    for split in indexes:
-        with open(DIRS[split]["index"], "w") as f: json.dump(indexes[split], f, indent=2)
-    
     if TEMP_DIR.exists(): shutil.rmtree(TEMP_DIR)
 
 if __name__ == "__main__":

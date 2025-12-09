@@ -1,5 +1,6 @@
 """
 Step 3: Build the Probing Metadata Table (Train/Test/Eval)
+REQUIRED: Updated to read the new .jsonl format
 """
 import json
 import pandas as pd
@@ -7,9 +8,10 @@ from pathlib import Path
 
 # Config
 EXTRACTED_DIR = Path("./extracted_features_fixed_text")
-TRAIN_INDEX = EXTRACTED_DIR / "train_index.json"
-TEST_INDEX = EXTRACTED_DIR / "test_index.json"
-EVAL_INDEX = EXTRACTED_DIR / "eval_index.json"
+# CHANGED: Pointing to .jsonl files
+TRAIN_INDEX = EXTRACTED_DIR / "train_index.jsonl"
+TEST_INDEX = EXTRACTED_DIR / "test_index.jsonl"
+EVAL_INDEX = EXTRACTED_DIR / "eval_index.jsonl"
 OUTPUT_PATH = EXTRACTED_DIR / "probing_metadata.parquet"
 
 def main():
@@ -19,27 +21,37 @@ def main():
     
     # Load Train
     if TRAIN_INDEX.exists():
-        with open(TRAIN_INDEX, 'r') as f: data = json.load(f)
-        print(f"Train samples: {len(data)}")
-        df = pd.DataFrame(data)
-        df["split_mode"] = "train"
-        frames.append(df)
+        print(f"Loading {TRAIN_INDEX}...")
+        try:
+            # CHANGED: lines=True is required for .jsonl
+            df = pd.read_json(TRAIN_INDEX, lines=True)
+            print(f"Train samples: {len(df)}")
+            df["split_mode"] = "train"
+            frames.append(df)
+        except ValueError:
+            print("Warning: Train index empty or invalid.")
         
     # Load Test
     if TEST_INDEX.exists():
-        with open(TEST_INDEX, 'r') as f: data = json.load(f)
-        print(f"Test samples:  {len(data)}")
-        df = pd.DataFrame(data)
-        df["split_mode"] = "test"
-        frames.append(df)
+        print(f"Loading {TEST_INDEX}...")
+        try:
+            df = pd.read_json(TEST_INDEX, lines=True)
+            print(f"Test samples:  {len(df)}")
+            df["split_mode"] = "test"
+            frames.append(df)
+        except ValueError:
+            print("Warning: Test index empty or invalid.")
 
     # Load Eval
     if EVAL_INDEX.exists():
-        with open(EVAL_INDEX, 'r') as f: data = json.load(f)
-        print(f"Eval samples:  {len(data)}")
-        df = pd.DataFrame(data)
-        df["split_mode"] = "eval"
-        frames.append(df)
+        print(f"Loading {EVAL_INDEX}...")
+        try:
+            df = pd.read_json(EVAL_INDEX, lines=True)
+            print(f"Eval samples:  {len(df)}")
+            df["split_mode"] = "eval"
+            frames.append(df)
+        except ValueError:
+            print("Warning: Eval index empty or invalid.")
 
     if not frames:
         print("Error: No data found.")
