@@ -1,5 +1,6 @@
 """
 Step 4: Run Logistic Regression Probe (Train/Test/Eval)
+FIXED: Automatically selects a valid target speaker from the dataset.
 """
 import pandas as pd
 import torch
@@ -14,7 +15,6 @@ METADATA_PATH = "./extracted_features_fixed_text/probing_metadata.parquet"
 RESULTS_DIR = Path("./probing_results")
 RESULTS_DIR.mkdir(exist_ok=True)
 
-TARGET_SPEAKER = "100" 
 NUM_NEGATIVE_SPEAKERS = 50 
 
 def load_vectors(file_paths, layer_name):
@@ -32,14 +32,14 @@ def load_vectors(file_paths, layer_name):
     if not vectors: return None
     return np.stack(vectors)
 
-def run_probe_for_layer(df, layer_name, timestep):
+def run_probe_for_layer(df, layer_name, timestep, target_speaker):
     subset = df[(df["block_name"] == layer_name) & (df["timestep"] == timestep)]
 
     # --- 1. TRAIN SET ---
     train_subset = subset[subset["split_mode"] == "train"]
-    pos_train = train_subset[train_subset["speaker_id"] == TARGET_SPEAKER]["pt_file"].tolist()
+    pos_train = train_subset[train_subset["speaker_id"] == target_speaker]["pt_file"].tolist()
     
-    neg_train_df = train_subset[train_subset["speaker_id"] != TARGET_SPEAKER]
+    neg_train_df = train_subset[train_subset["speaker_id"] != target_speaker]
     all_neg_speakers = neg_train_df["speaker_id"].unique()
     if len(all_neg_speakers) == 0: return None
     
@@ -55,9 +55,9 @@ def run_probe_for_layer(df, layer_name, timestep):
     X_train = np.concatenate([X_pos_train, X_neg_train])
     y_train = np.concatenate([np.ones(len(X_pos_train)), np.zeros(len(X_neg_train))])
 
-    # --- 2. TEST SET (Same Ref, Diff Text) ---
+    # --- 2. TEST SET ---
     test_subset = subset[subset["split_mode"] == "test"]
-    pos_test = test_subset[test_subset["speaker_id"] == TARGET_SPEAKER]["pt_file"].tolist()
+    pos_test = test_subset[test_subset["speaker_id"] == target_speaker]["pt_file"].tolist()
     neg_test = test_subset[test_subset["speaker_id"].isin(chosen_neg)]["pt_file"].tolist()
     
     X_test, y_test = None, None
@@ -68,9 +68,9 @@ def run_probe_for_layer(df, layer_name, timestep):
             X_test = np.concatenate([X_pos_test, X_neg_test])
             y_test = np.concatenate([np.ones(len(X_pos_test)), np.zeros(len(X_neg_test))])
 
-    # --- 3. EVAL SET (Diff Ref, Same/Diff Text) ---
+    # --- 3. EVAL SET ---
     eval_subset = subset[subset["split_mode"] == "eval"]
-    pos_eval = eval_subset[eval_subset["speaker_id"] == TARGET_SPEAKER]["pt_file"].tolist()
+    pos_eval = eval_subset[eval_subset["speaker_id"] == target_speaker]["pt_file"].tolist()
     neg_eval = eval_subset[eval_subset["speaker_id"].isin(chosen_neg)]["pt_file"].tolist()
     
     X_eval, y_eval = None, None
@@ -108,20 +108,38 @@ def run_probe_for_layer(df, layer_name, timestep):
     return result
 
 def main():
-    if not Path(METADATA_PATH).exists(): return
+    if not Path(METADATA_PATH).exists(): 
+        print(f"Error: {METADATA_PATH} not found.")
+        return
+        
+    print(f"Loading metadata from {METADATA_PATH}...")
     df = pd.read_parquet(METADATA_PATH)
     
+    # --- AUTO-SELECT SPEAKER ---
+    # Pick the most common speaker in the train set to ensure we have data
+    train_counts = df[df["split_mode"]=="train"]["speaker_id"].value_counts()
+    if train_counts.empty:
+        print("Error: No training data found in metadata.")
+        return
+        
+    target_speaker = str(train_counts.idxmax())
+    print(f"Auto-selected Target Speaker: {target_speaker}")
+    # ---------------------------
+
     unique_layers = df["block_name"].unique().tolist()
     unique_timesteps = sorted(df["timestep"].unique().tolist())
     
     results = []
+    print("Running probes...")
     for layer in tqdm(unique_layers, desc="Layers"):
         for t in unique_timesteps:
-            res = run_probe_for_layer(df, layer, t)
+            res = run_probe_for_layer(df, layer, t, target_speaker)
             if res: results.append(res)
 
     results_df = pd.DataFrame(results)
-    results_df.to_csv(RESULTS_DIR / f"probe_results_speaker_{TARGET_SPEAKER}.csv", index=False)
+    output_file = RESULTS_DIR / f"probe_results_speaker_{target_speaker}.csv"
+    results_df.to_csv(output_file, index=False)
+    print(f"Results saved to {output_file}")
     
     print("\nTop 5 Layers (Eval AUC):")
     if not results_df.empty and "eval_auc" in results_df.columns:
