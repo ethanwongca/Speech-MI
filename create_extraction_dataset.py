@@ -1,13 +1,13 @@
 """
 Step 2: DiT Activation Extraction (Train/Test/Eval Split)
-OPTIMIZED: Uses JSONL streaming and GC to prevent OOM
+OPTIMIZED: Robust Resume, Safe Temp Cleanup
 """
 from __future__ import annotations
 from pathlib import Path
 import json
 import shutil
 import soundfile as sf
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Set
 import torch
 from datasets import load_from_disk
 from omegaconf import OmegaConf
@@ -24,7 +24,6 @@ TRAIN_TEXT = "The rainbow is a division of white light into many beautiful color
 TEST_TEXT = "The quick brown fox jumps over the lazy dog."
 EVAL_TEXT = "The quick brown fox jumps over the lazy dog." 
 
-# Directories - CHANGED to .jsonl
 DIRS = {
     "train": { "tensors": OUTPUT_DIR / "train" / "tensors", "index": OUTPUT_DIR / "train_index.jsonl" },
     "test":  { "tensors": OUTPUT_DIR / "test" / "tensors",  "index": OUTPUT_DIR / "test_index.jsonl" },
@@ -32,16 +31,21 @@ DIRS = {
 }
 TEMP_DIR = OUTPUT_DIR / "tmp"
 
-# Initialize directories and clear old index files
-for split in DIRS.keys():
-    DIRS[split]["tensors"].mkdir(parents=True, exist_ok=True)
-    # Clear/Create empty index files
-    with open(DIRS[split]["index"], "w") as f:
-        pass 
+# 1. Helper to read specific indexes
+def get_existing_ids(index_path: Path) -> Set[str]:
+    """Returns a set of speaker_ids present in the given jsonl file."""
+    existing = set()
+    if index_path.exists():
+        with open(index_path, "r") as f:
+            for line in f:
+                try:
+                    data = json.loads(line)
+                    existing.add(str(data["speaker_id"]))
+                except (json.JSONDecodeError, KeyError):
+                    continue
+    return existing
 
-TEMP_DIR.mkdir(parents=True, exist_ok=True)
-
-# 1. Model Loading
+# 2. Model Loading
 def load_f5_model_and_vocoder(device: str = "cuda") -> Tuple[torch.nn.Module, torch.nn.Module]:
     print(f"Device: {device}")
     model_name = "F5TTS_v1_Base"
@@ -63,7 +67,7 @@ def load_f5_model_and_vocoder(device: str = "cuda") -> Tuple[torch.nn.Module, to
     print("Model loaded\n")
     return model, vocoder
 
-# 2. Layer Selection
+# 3. Layer Selection
 def select_dit_hook_layers(transformer: torch.nn.Module) -> Dict[str, str]:
     hook_layers = {}
     for name, _ in transformer.named_modules():
@@ -72,7 +76,7 @@ def select_dit_hook_layers(transformer: torch.nn.Module) -> Dict[str, str]:
             hook_layers[name] = name
     return hook_layers
 
-# 3. Capture Logic
+# 4. Capture Logic
 def run_speaker_capture(
     model: torch.nn.Module,
     vocoder: torch.nn.Module,
@@ -90,6 +94,10 @@ def run_speaker_capture(
     speaker_tensor_dir.mkdir(parents=True, exist_ok=True)
     
     run_temp_dir = TEMP_DIR / f"{speaker_id}_{split}"
+    
+    # Clean slate for this run (Deletes old tmp files if they exist)
+    if run_temp_dir.exists():
+        shutil.rmtree(run_temp_dir)
     run_temp_dir.mkdir(parents=True, exist_ok=True)
 
     transformer = model.transformer
@@ -127,7 +135,6 @@ def run_speaker_capture(
     finally:
         if hasattr(transformer, "remove_hooks"): transformer.remove_hooks()
         if hasattr(transformer, "clear_activations"): transformer.clear_activations()
-        # Explicit cleanup of hook manager
         del hook_manager
 
     entries = []
@@ -135,22 +142,19 @@ def run_speaker_capture(
     for step_folder in sorted(run_temp_dir.iterdir()):
         if not step_folder.is_dir(): continue
         try:
-            if step_folder.name.startswith("step_"):
-                step_idx = int(step_folder.name.split("_")[1])
-            else:
-                step_idx = int(step_folder.name)
+            name_parts = step_folder.name.split("_")
+            step_idx = int(name_parts[1]) if len(name_parts) > 1 else int(step_folder.name)
         except ValueError:
             continue
             
         step_tensors = {}
         for pt_file in step_folder.glob("*.pt"):
             try:
-                # Ensure map_location is cpu to save GPU mem, though we are limited by System RAM here
                 data = torch.load(pt_file, map_location="cpu")
                 layer_name = pt_file.stem
                 if "activations" in data and "__output__" in data["activations"]:
                     step_tensors[layer_name] = data["activations"]["__output__"]
-                del data # Help GC
+                del data 
             except Exception:
                 continue
 
@@ -167,25 +171,40 @@ def run_speaker_capture(
                 "timestep": step_idx,
                 "layers_included": list(step_tensors.keys())
             })
-            del step_tensors # Help GC
+            del step_tensors 
 
     shutil.rmtree(run_temp_dir, ignore_errors=True)
     return entries
 
 def append_to_jsonl(entries: List[Dict], filepath: Path):
-    """Appends entries to a JSONL file immediately."""
     if not entries: return
     with open(filepath, "a") as f:
         for entry in entries:
             f.write(json.dumps(entry) + "\n")
 
-# 4. Main Driver
+# 5. Main Driver
 def main() -> None:
     print("\n" + "=" * 80)
-    print("DiT EXTRACTION (Train/Test/Eval) - OPTIMIZED")
+    print("DiT EXTRACTION (Robust Resume Mode - NO GC)")
     print("=" * 80 + "\n")
 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Initialize dirs (Do not overwrite)
+    for split in DIRS.keys():
+        DIRS[split]["tensors"].mkdir(parents=True, exist_ok=True)
+        if not DIRS[split]["index"].exists():
+            with open(DIRS[split]["index"], "w") as f: pass
+            
+    TEMP_DIR.mkdir(parents=True, exist_ok=True)
+
+    # --- UPDATED RESUME LOGIC (Checks all splits) ---
+    print("Checking existing progress...")
+    done_train = get_existing_ids(DIRS["train"]["index"])
+    done_test = get_existing_ids(DIRS["test"]["index"])
+    done_eval = get_existing_ids(DIRS["eval"]["index"])
+    print(f"  Found {len(done_train)} Train, {len(done_test)} Test, {len(done_eval)} Eval speakers.")
+    # ------------------------------------------------
 
     try:
         model, vocoder = load_f5_model_and_vocoder(device=DEVICE)
@@ -208,47 +227,69 @@ def main() -> None:
         "device": DEVICE,
     }
 
-    # REMOVED: indexes = { "train": [], "test": [], "eval": [] }
-    
     for idx, sample in enumerate(ds):
         speaker_id = str(sample["speaker_id"])
         sample_idx = sample.get("sample_idx", 0)
+
+        # --- SMART SKIP LOGIC ---
+        if sample_idx == 0:
+            # We skip ONLY if BOTH Train and Test are finished
+            if speaker_id in done_train and speaker_id in done_test:
+                if idx % 500 == 0: print(f"Skipping done (Train+Test): {speaker_id}")
+                continue
+        elif sample_idx == 1:
+            # We skip if Eval is finished
+            if speaker_id in done_eval:
+                if idx % 500 == 0: print(f"Skipping done (Eval): {speaker_id}")
+                continue
+        # ------------------------
         
         print(f"\nProcessing {idx+1}/{len(ds)}: Speaker {speaker_id} | Sample {sample_idx}")
 
-        # Write current sample to wav
         temp_wav_path = TEMP_DIR / f"{speaker_id}_sample{sample_idx}.wav"
         sf.write(str(temp_wav_path), sample["audio"]["array"], sample["audio"]["sampling_rate"])
 
         if sample_idx == 0:
-            # Used for both Train and Test generations
-            print(f"  > Generating TRAIN...")
-            train_entries = run_speaker_capture(
-                model, vocoder, speaker_id, temp_wav_path,
-                sample["text_normalized"], TRAIN_TEXT,
-                inference_params, DEVICE, "train"
-            )
-            append_to_jsonl(train_entries, DIRS["train"]["index"])
+            # Check Train
+            if speaker_id not in done_train:
+                print(f"  > Generating TRAIN...")
+                train_entries = run_speaker_capture(
+                    model, vocoder, speaker_id, temp_wav_path,
+                    sample["text_normalized"], TRAIN_TEXT,
+                    inference_params, DEVICE, "train"
+                )
+                append_to_jsonl(train_entries, DIRS["train"]["index"])
+            else:
+                print(f"  > Train already exists, skipping.")
 
-            print(f"  > Generating TEST...")
-            test_entries = run_speaker_capture(
-                model, vocoder, speaker_id, temp_wav_path,
-                sample["text_normalized"], TEST_TEXT,
-                inference_params, DEVICE, "test"
-            )
-            append_to_jsonl(test_entries, DIRS["test"]["index"])
+            # Check Test (This fixes your issue!)
+            if speaker_id not in done_test:
+                print(f"  > Generating TEST...")
+                test_entries = run_speaker_capture(
+                    model, vocoder, speaker_id, temp_wav_path,
+                    sample["text_normalized"], TEST_TEXT,
+                    inference_params, DEVICE, "test"
+                )
+                append_to_jsonl(test_entries, DIRS["test"]["index"])
+            else:
+                print(f"  > Test already exists, skipping.")
         
         elif sample_idx == 1:
-            # Used for Eval generation (checks generalization to new audio)
-            print(f"  > Generating EVAL...")
-            eval_entries = run_speaker_capture(
-                model, vocoder, speaker_id, temp_wav_path,
-                sample["text_normalized"], EVAL_TEXT,
-                inference_params, DEVICE, "eval"
-            )
-            append_to_jsonl(eval_entries, DIRS["eval"]["index"])
+            # Check Eval
+            if speaker_id not in done_eval:
+                print(f"  > Generating EVAL...")
+                eval_entries = run_speaker_capture(
+                    model, vocoder, speaker_id, temp_wav_path,
+                    sample["text_normalized"], EVAL_TEXT,
+                    inference_params, DEVICE, "eval"
+                )
+                append_to_jsonl(eval_entries, DIRS["eval"]["index"])
+            else:
+                 print(f"  > Eval already exists, skipping.")
 
         if temp_wav_path.exists(): temp_wav_path.unlink()
+        
+        # NO GC HERE as requested.
 
     if TEMP_DIR.exists(): shutil.rmtree(TEMP_DIR)
 
