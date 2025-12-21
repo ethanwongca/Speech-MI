@@ -139,5 +139,9 @@ def main():
     results_df.to_csv(output_file, index=False)
     print(f"Results saved to {output_file}")
 
+    print("\n Top 5 layers (Eval AUC)")
+    if not results_df.empty and "eval_auc" in results_df.columns:
+        print(results_df.sort_values("eval_auc", ascending=False).head(5))
+
 if __name__ == "__main__":
     main()
