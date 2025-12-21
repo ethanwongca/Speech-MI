@@ -1,6 +1,5 @@
 """
-Step 3: Build the Probing Metadata Table (Train/Test/Eval)
-REQUIRED: Updated to read the new .jsonl format
+Step 3: Build the Probing Metadata Table (Train/Test Only)
 """
 import json
 import pandas as pd
@@ -8,7 +7,6 @@ from pathlib import Path
 
 # Config
 EXTRACTED_DIR = Path("./extracted_features_fixed_text")
-# CHANGED: Pointing to .jsonl files
 TRAIN_INDEX = EXTRACTED_DIR / "train_index.jsonl"
 TEST_INDEX = EXTRACTED_DIR / "test_index.jsonl"
 EVAL_INDEX = EXTRACTED_DIR / "eval_index.jsonl"
@@ -23,7 +21,6 @@ def main():
     if TRAIN_INDEX.exists():
         print(f"Loading {TRAIN_INDEX}...")
         try:
-            # CHANGED: lines=True is required for .jsonl
             df = pd.read_json(TRAIN_INDEX, lines=True)
             print(f"Train samples: {len(df)}")
             df["split_mode"] = "train"
@@ -42,7 +39,7 @@ def main():
         except ValueError:
             print("Warning: Test index empty or invalid.")
 
-    # Load Eval
+    # Load Eval (Optional check)
     if EVAL_INDEX.exists():
         print(f"Loading {EVAL_INDEX}...")
         try:
@@ -51,7 +48,7 @@ def main():
             df["split_mode"] = "eval"
             frames.append(df)
         except ValueError:
-            print("Warning: Eval index empty or invalid.")
+            print("Warning: Eval index exists but is empty/invalid.")
 
     if not frames:
         print("Error: No data found.")

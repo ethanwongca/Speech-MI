@@ -1,6 +1,5 @@
 """
 Step 2: DiT Activation Extraction (Train/Test/Eval Split)
-OPTIMIZED: Robust Resume, Safe Temp Cleanup
 """
 from __future__ import annotations
 from pathlib import Path
@@ -53,7 +52,7 @@ def load_f5_model_and_vocoder(device: str = "cuda") -> Tuple[torch.nn.Module, to
     LOCAL_VOCODER_PATH = Path("/home/ewong/links/scratch/checkpoints/vocos-mel-24khz")
 
     if not LOCAL_MODEL_PATH.exists(): raise FileNotFoundError(f"Missing model at {LOCAL_MODEL_PATH}")
-
+    
     print("Loading vocoder...")
     vocoder = load_vocoder(vocoder_name="vocos", is_local=True, local_path=str(LOCAL_VOCODER_PATH), device=device)
     
@@ -72,7 +71,7 @@ def select_dit_hook_layers(transformer: torch.nn.Module) -> Dict[str, str]:
     hook_layers = {}
     for name, _ in transformer.named_modules():
         parts = name.split(".")
-        if len(parts) == 3 and parts[0] == "transformer_blocks" and parts[2] in ["attn_norm", "attn", "ff"]:
+        if len(parts) == 3 and parts[0] == "transformer_blocks" and parts[2] in ["attn", "ff"]:
             hook_layers[name] = name
     return hook_layers
 
@@ -231,18 +230,14 @@ def main() -> None:
         speaker_id = str(sample["speaker_id"])
         sample_idx = sample.get("sample_idx", 0)
 
-        # --- SMART SKIP LOGIC ---
         if sample_idx == 0:
             # We skip ONLY if BOTH Train and Test are finished
             if speaker_id in done_train and speaker_id in done_test:
                 if idx % 500 == 0: print(f"Skipping done (Train+Test): {speaker_id}")
                 continue
         elif sample_idx == 1:
-            # We skip if Eval is finished
-            if speaker_id in done_eval:
-                if idx % 500 == 0: print(f"Skipping done (Eval): {speaker_id}")
-                continue
-        # ------------------------
+            continue 
+            # Skipping evaluation dataset for now
         
         print(f"\nProcessing {idx+1}/{len(ds)}: Speaker {speaker_id} | Sample {sample_idx}")
 

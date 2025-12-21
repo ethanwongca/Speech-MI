@@ -1,6 +1,5 @@
 """
-Step 4: Run Logistic Regression Probe (Train/Test/Eval)
-FIXED: Automatically selects a valid target speaker from the dataset.
+Step 4: Run Logistic Regression Probe (Train/Test Only)
 """
 import pandas as pd
 import torch
@@ -68,18 +67,20 @@ def run_probe_for_layer(df, layer_name, timestep, target_speaker):
             X_test = np.concatenate([X_pos_test, X_neg_test])
             y_test = np.concatenate([np.ones(len(X_pos_test)), np.zeros(len(X_neg_test))])
 
-    # --- 3. EVAL SET ---
+    # --- 3. EVAL SET (Optional) ---
     eval_subset = subset[subset["split_mode"] == "eval"]
-    pos_eval = eval_subset[eval_subset["speaker_id"] == target_speaker]["pt_file"].tolist()
-    neg_eval = eval_subset[eval_subset["speaker_id"].isin(chosen_neg)]["pt_file"].tolist()
-    
     X_eval, y_eval = None, None
-    if pos_eval and neg_eval:
-        X_pos_eval = load_vectors(pos_eval, layer_name)
-        X_neg_eval = load_vectors(neg_eval, layer_name)
-        if X_pos_eval is not None and X_neg_eval is not None:
-            X_eval = np.concatenate([X_pos_eval, X_neg_eval])
-            y_eval = np.concatenate([np.ones(len(X_pos_eval)), np.zeros(len(X_neg_eval))])
+    
+    if not eval_subset.empty:
+        pos_eval = eval_subset[eval_subset["speaker_id"] == target_speaker]["pt_file"].tolist()
+        neg_eval = eval_subset[eval_subset["speaker_id"].isin(chosen_neg)]["pt_file"].tolist()
+        
+        if pos_eval and neg_eval:
+            X_pos_eval = load_vectors(pos_eval, layer_name)
+            X_neg_eval = load_vectors(neg_eval, layer_name)
+            if X_pos_eval is not None and X_neg_eval is not None:
+                X_eval = np.concatenate([X_pos_eval, X_neg_eval])
+                y_eval = np.concatenate([np.ones(len(X_pos_eval)), np.zeros(len(X_neg_eval))])
 
     # --- TRAIN & EVALUATE ---
     scaler = StandardScaler()
@@ -115,8 +116,6 @@ def main():
     print(f"Loading metadata from {METADATA_PATH}...")
     df = pd.read_parquet(METADATA_PATH)
     
-    # --- AUTO-SELECT SPEAKER ---
-    # Pick the most common speaker in the train set to ensure we have data
     train_counts = df[df["split_mode"]=="train"]["speaker_id"].value_counts()
     if train_counts.empty:
         print("Error: No training data found in metadata.")
@@ -124,7 +123,6 @@ def main():
         
     target_speaker = str(train_counts.idxmax())
     print(f"Auto-selected Target Speaker: {target_speaker}")
-    # ---------------------------
 
     unique_layers = df["block_name"].unique().tolist()
     unique_timesteps = sorted(df["timestep"].unique().tolist())
@@ -140,10 +138,6 @@ def main():
     output_file = RESULTS_DIR / f"probe_results_speaker_{target_speaker}.csv"
     results_df.to_csv(output_file, index=False)
     print(f"Results saved to {output_file}")
-    
-    print("\nTop 5 Layers (Eval AUC):")
-    if not results_df.empty and "eval_auc" in results_df.columns:
-        print(results_df.sort_values("eval_auc", ascending=False).head(5))
 
 if __name__ == "__main__":
     main()
