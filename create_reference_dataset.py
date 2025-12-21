@@ -4,7 +4,7 @@ Step 1: Generate the reference dataset (Randomized & Two samples per speaker)
 import glob
 from datasets import load_dataset, Audio, Dataset, Features, Value
 
-# --- CONFIGURATION ---
+# Config
 DATA_PATH = "../libritts/data/**/*.parquet"
 OUTPUT_DIR = "./libritts_reference_speakers"
 SAMPLING_RATE = 24000
@@ -22,7 +22,7 @@ def create_reference_dataset():
         # Load parquet in streaming mode
         ds_stream = load_dataset("parquet", data_files=files, split="train", streaming=True)
         
-        # --- UPDATE: Shuffle for random sampling ---
+        # random shuffling to randomly pick speaker vals
         # buffer_size ensures we aren't just taking the first speakers alphabetically/sequentially
         ds_stream = ds_stream.shuffle(seed=42, buffer_size=1000)
         

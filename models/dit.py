@@ -232,7 +232,7 @@ class FeaturePatchHook:
         return self._replace_output(outputs, patched)
 
 # =======================================
-# ORIGINAL DiT MODULES
+# DiT MODULES
 # =======================================
 class TextEmbedding(nn.Module):
     def __init__(self, text_num_embeds, text_dim, mask_padding=True, average_upsampling=False, conv_layers=0, conv_mult=2):
