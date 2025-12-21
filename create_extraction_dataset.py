@@ -15,7 +15,7 @@ from importlib.resources import files
 from f5_tts.infer.utils_infer import load_model, load_vocoder, preprocess_ref_audio_text, infer_process
 from f5_tts.model.cfm import HookConfig, HookManager
 
-# --- CONFIGURATION ---
+# Configs
 INPUT_DATASET_PATH = "./libritts_reference_speakers"
 OUTPUT_DIR = Path("./extracted_features_fixed_text")
 
@@ -71,7 +71,7 @@ def select_dit_hook_layers(transformer: torch.nn.Module) -> Dict[str, str]:
     hook_layers = {}
     for name, _ in transformer.named_modules():
         parts = name.split(".")
-        if len(parts) == 3 and parts[0] == "transformer_blocks" and parts[2] in ["attn", "ff"]:
+        if len(parts) == 3 and parts[0] == "transformer_blocks" and parts[2] == "attn":
             hook_layers[name] = name
     return hook_layers
 
@@ -197,13 +197,12 @@ def main() -> None:
             
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
 
-    # --- UPDATED RESUME LOGIC (Checks all splits) ---
+    # resume our training set if our HPC gets interrupted 
     print("Checking existing progress...")
     done_train = get_existing_ids(DIRS["train"]["index"])
     done_test = get_existing_ids(DIRS["test"]["index"])
     done_eval = get_existing_ids(DIRS["eval"]["index"])
     print(f"  Found {len(done_train)} Train, {len(done_test)} Test, {len(done_eval)} Eval speakers.")
-    # ------------------------------------------------
 
     try:
         model, vocoder = load_f5_model_and_vocoder(device=DEVICE)
@@ -236,7 +235,9 @@ def main() -> None:
                 if idx % 500 == 0: print(f"Skipping done (Train+Test): {speaker_id}")
                 continue
         elif sample_idx == 1:
-            continue 
+            if speaker_id in done_eval:
+                if idx % 500 == 0: print(f"Skipping done (Eval): {speaker_id}")
+                continue
             # Skipping evaluation dataset for now
         
         print(f"\nProcessing {idx+1}/{len(ds)}: Speaker {speaker_id} | Sample {sample_idx}")
