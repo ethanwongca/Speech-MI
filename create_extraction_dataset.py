@@ -159,8 +159,22 @@ def run_speaker_capture(
 
         if step_tensors:
             combined_filename = f"step_{step_idx}.pt"
+
+            # IO Stream Issue Fix 
             combined_path = speaker_tensor_dir / combined_filename
-            torch.save(step_tensors, combined_path)
+            max_retries = 5
+            for attempt in range(max_retries):
+                try:
+                    torch.save(step_tensors, combined_path)
+                    break  
+                except (RuntimeError, OSError) as e:
+                    if attempt == max_retries - 1:
+                        print(f"CRITICAL: Failed to save {combined_path} after {max_retries} attempts.")
+                        raise e  
+                    
+                    wait_time = (attempt + 1) * 2  
+                    print(f"Write failed for {combined_filename} (Attempt {attempt+1}/{max_retries}). Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
             
             entries.append({
                 "speaker_id": speaker_id,
