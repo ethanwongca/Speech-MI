@@ -90,6 +90,52 @@ class FeatureExtractionHook:
             "call_count": self.call_count,
         }
 
+class FeatureExtractionMeanVectorHook:
+    """
+    Lightweight forward hook used for activation
+
+    Stores the mean vector
+    """
+
+    def __init__(self, storage: dict, name: str, output_index: int = 0):
+        """
+        Args:
+            storage: Dict to store extracted activations into.
+            name: Unique key used inside storage.
+            output_index: For modules that return tuples (e.g., (x, aux)).
+        """
+        self.storage = storage
+        self.name = name
+        self.output_index = output_index
+        self.call_count = 0
+
+    def __call__(self, module, args, kwargs, outputs):
+        """
+        Forward hook callback.
+        Automatically executed by PyTorch during module.forward().
+
+        Stores a fully detached, cloned, CPU/bfloat16 copy.
+        """
+        self.call_count += 1
+
+        is_tuple = isinstance(outputs, tuple)
+        target = outputs[self.output_index] if is_tuple else outputs
+
+        with torch.no_grad():
+            safe_tensor = (
+                target.detach()
+                .clone()
+                .cpu()
+                .to(torch.bfloat16)
+            )
+
+        self.storage[self.name] = {
+            "tensor": safe_tensor,
+            "device": str(target.device),
+            "shape": tuple(target.shape),
+            "call_count": self.call_count,
+        }
+
 
 class FeaturePatchHook:
     """

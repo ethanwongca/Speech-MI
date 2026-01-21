@@ -113,7 +113,11 @@ def run_speaker_capture(
     capture_layers = select_dit_hook_layers(transformer)
 
     hook_config = HookConfig(
+        capture_all_submodules=False,
+        capture_all_layers=False,
         capture_layers=capture_layers,
+        capture_final_output=False,
+        time_filter=lambda t, step: True,
         precision=torch.bfloat16,
         device=device,
         save_per_timestep=True,
@@ -139,6 +143,7 @@ def run_speaker_capture(
     finally:
         if hasattr(transformer, "remove_hooks"): transformer.remove_hooks()
         if hasattr(transformer, "clear_activations"): transformer.clear_activations()
+        if hasattr(transformer, "clear_cache"): transformer.clear_cache()
 
     # --- UPDATED CONSOLIDATION LOGIC ---
     print(f"  > Consolidating vectors for {speaker_id}...")
