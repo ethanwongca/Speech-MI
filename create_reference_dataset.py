@@ -8,7 +8,7 @@ from datasets import load_dataset, Audio, Dataset, Features, Value
 DATA_PATH = "../libritts/data/**/*.parquet"
 OUTPUT_DIR = "./libritts_reference_speakers"
 SAMPLING_RATE = 24000
-SAMPLES_PER_SPEAKER = 2  # Sample 0 = Train/Test, Sample 1 = Eval
+SAMPLES_PER_SPEAKER = 1  # Sample 0 = Train/Test, Sample 1 = Eval
 
 def create_reference_dataset():
     files = glob.glob(DATA_PATH, recursive=True)

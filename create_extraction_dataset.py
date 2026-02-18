@@ -7,6 +7,8 @@ import json
 import shutil
 import re
 import time
+import random
+import argparse
 import soundfile as sf
 from typing import Dict, List, Tuple, Set
 import torch
@@ -23,12 +25,10 @@ OUTPUT_DIR = Path("./mean_vectors")
 
 TRAIN_TEXT = "The rainbow is a division of white light into many beautiful colors."
 TEST_TEXT = "The quick brown fox jumps over the lazy dog."
-EVAL_TEXT = "The quick brown fox jumps over the lazy dog." 
 
 DIRS = {
     "train": { "folder": OUTPUT_DIR / "train", "index": OUTPUT_DIR / "train_index.jsonl" },
     "test":  { "folder": OUTPUT_DIR / "test",  "index": OUTPUT_DIR / "test_index.jsonl" },
-    "eval":  { "folder": OUTPUT_DIR / "eval",  "index": OUTPUT_DIR / "eval_index.jsonl" }
 }
 TEMP_DIR = OUTPUT_DIR / "tmp"
 
@@ -98,6 +98,7 @@ def run_speaker_capture(
     inference_params: dict,
     device: str,
     split: str,
+    step_filter_mode: str = "all",
 ) -> List[Dict]:
     
     # Ensure permanent directory exists
@@ -112,12 +113,19 @@ def run_speaker_capture(
     transformer = model.transformer
     capture_layers = select_dit_hook_layers(transformer)
 
+    if step_filter_mode == "even":
+        time_filter = lambda t, step: step % 2 == 0
+    elif step_filter_mode == "odd":
+        time_filter = lambda t, step: step % 2 != 0
+    else:
+        time_filter = lambda t, step: True
+
     hook_config = HookConfig(
         capture_all_submodules=False,
         capture_all_layers=False,
         capture_layers=capture_layers,
         capture_final_output=False,
-        time_filter=lambda t, step: True,
+        time_filter=time_filter,
         precision=torch.bfloat16,
         device=device,
         save_per_timestep=True,
@@ -211,6 +219,7 @@ def run_speaker_capture(
                 "type": group_name,
                 "pt_file": str(dest_path.absolute()),
                 "timestep": step_idx,
+                "step_filter_mode": step_filter_mode,
                 "layers_included": list(tensors.keys())
             })
 
@@ -242,7 +251,6 @@ def main() -> None:
 
     done_train = get_existing_ids(DIRS["train"]["index"])
     done_test = get_existing_ids(DIRS["test"]["index"])
-    done_eval = get_existing_ids(DIRS["eval"]["index"])
 
     try:
         model, vocoder = load_f5_model_and_vocoder(device=DEVICE)
@@ -255,33 +263,51 @@ def main() -> None:
         "cfg_strength": 2.0, "sway_sampling_coef": -1, "speed": 1.0, "fix_duration": None, "device": DEVICE,
     }
 
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--test_speaker", type=str, help="Run only for this specific speaker ID")
+    parser.add_argument("--rank", type=int, default=0, help="Rank of the current process")
+    parser.add_argument("--world_size", type=int, default=1, help="Total number of processes")
+    args = parser.parse_args()
+
+    # Get all unique speakers and partition them
+    all_speakers = sorted(list(set(sample["speaker_id"] for sample in ds)))
+    my_speakers = set(all_speakers[args.rank::args.world_size])
+    print(f"Rank {args.rank}/{args.world_size}: Processing {len(my_speakers)}/{len(all_speakers)} speakers.")
+
     for idx, sample in enumerate(ds):
         speaker_id = str(sample["speaker_id"])
         sample_idx = sample.get("sample_idx", 0)
 
+        # Skip if test_speaker provided and doesn't match
+        if args.test_speaker and speaker_id != args.test_speaker:
+            continue
+        
+        # Parallelization filter: skip if speaker not assigned to this rank
+        if speaker_id not in my_speakers:
+            continue
+
         # continuation logic
         if sample_idx == 0:
             if speaker_id in done_train and speaker_id in done_test: continue
-        elif sample_idx == 1:
-            if speaker_id in done_eval: continue
         
         print(f"\nProcessing {idx+1}/{len(ds)}: Speaker {speaker_id} | Sample {sample_idx}")
         temp_wav_path = TEMP_DIR / f"{speaker_id}_sample{sample_idx}.wav"
         sf.write(str(temp_wav_path), sample["audio"]["array"], sample["audio"]["sampling_rate"])
 
         if sample_idx == 0:
+            # Randomly select mode for THIS speaker
+            selected_mode = random.choice(["even", "odd"])
+            print(f"  > Selected mode: {selected_mode.upper()}")
+
             if speaker_id not in done_train:
                 print(f"  > TRAIN...")
-                append_to_jsonl(run_speaker_capture(model, vocoder, speaker_id, temp_wav_path, sample["text_normalized"], TRAIN_TEXT, inference_params, DEVICE, "train"), DIRS["train"]["index"])
+                append_to_jsonl(run_speaker_capture(model, vocoder, speaker_id, temp_wav_path, sample["text_normalized"], TRAIN_TEXT, inference_params, DEVICE, "train", step_filter_mode=selected_mode), DIRS["train"]["index"])
             if speaker_id not in done_test:
                 print(f"  > TEST...")
-                append_to_jsonl(run_speaker_capture(model, vocoder, speaker_id, temp_wav_path, sample["text_normalized"], TEST_TEXT, inference_params, DEVICE, "test"), DIRS["test"]["index"])
-        elif sample_idx == 1:
-            if speaker_id not in done_eval:
-                print(f"  > EVAL...")
-                append_to_jsonl(run_speaker_capture(model, vocoder, speaker_id, temp_wav_path, sample["text_normalized"], EVAL_TEXT, inference_params, DEVICE, "eval"), DIRS["eval"]["index"])
+                append_to_jsonl(run_speaker_capture(model, vocoder, speaker_id, temp_wav_path, sample["text_normalized"], TEST_TEXT, inference_params, DEVICE, "test", step_filter_mode=selected_mode), DIRS["test"]["index"])
 
         if temp_wav_path.exists(): temp_wav_path.unlink()
+
 
     if TEMP_DIR.exists(): shutil.rmtree(TEMP_DIR)
 
